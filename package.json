@@ -1,0 +1,32 @@
+{
+  "name": "poly-updown-bot-patched",
+  "version": "2.3.1",
+  "description": "BTC Up/Down automated trading bot for Polymarket (global) - patched for real CLOB trading; 2.2.1 fixes Deposit-Wallet (POLY_1271) order signing, L2 query-string signing, balance-cache refresh, pUSD address and RPC default",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/unit.test.js",
+    "doctor": "node tools/doctor.js",
+    "approve": "node tools/approve.js",
+    "test:integration": "node test/integration.test.js",
+    "test:exit": "node test/exit-integration.test.js",
+    "test:approvals": "node test/approvals-integration.test.js",
+    "test:all": "node test/unit.test.js && node test/integration.test.js && node test/exit-integration.test.js && node test/approvals-integration.test.js"
+  },
+  "keywords": [
+    "polymarket",
+    "prediction-market",
+    "trading-bot"
+  ],
+  "license": "ISC",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.4",
+    "express": "^4.21.1",
+    "ws": "^8.18.0"
+  }
+}

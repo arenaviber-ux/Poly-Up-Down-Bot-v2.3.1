@@ -1,0 +1,889 @@
+diff -ruN -x node_modules -x '*.log' -x itest_state.json -x bot_state.json -x smoke_state.json original/.env.example bot/poly-updown-bot-enhanced-V4/.env.example
+--- original/.env.example	2026-10-02 23:06:55.051291098 +0000
++++ bot/poly-updown-bot-enhanced-V4/.env.example	2026-10-02 23:08:35.367291098 +0000
+@@ -41,7 +41,23 @@
+ MAX_BUY_PRICE=0.97
+ 
+ # ---------------------------------------------------------------------------
+-# Risk
++# Risk — TWO INDEPENDENT LOSS BREAKERS, do not confuse them
++#
++#   STOP_LOSS_USD      cumulative NET realised P&L since the account was reset.
++#                      Never resets daily. Dashboard: "Stop-Loss Circuit Breaker".
++#
++#   MAX_DAILY_LOSS_USD GROSS realised losses inside the current UTC day. Winners
++#                      do NOT offset losers. Resets at 00:00 UTC, not local
++#                      midnight. Dashboard: "Max Daily Loss".
++#
++# Either one stops the bot. Because losses are booked per settled position and
++# the check runs once per loop tick (LOOP_MS), the counter overshoots the limit
++# by up to one trade — a "-$59.67" stop against a $50 cap is the $50 limit plus
++# a $9.67 loss, not a misconfigured $59.67 limit.
++#
++# Both are settable live from the dashboard, and the dashboard value wins over
++# whatever is set here for the life of the process (it is persisted in
++# bot_state.json and restored on restart).
+ # ---------------------------------------------------------------------------
+ STOP_LOSS_USD=25
+ MAX_OPEN_POSITIONS=1
+diff -ruN -x node_modules -x '*.log' -x itest_state.json -x bot_state.json -x smoke_state.json original/DAILY-LOSS-FIX.md bot/poly-updown-bot-enhanced-V4/DAILY-LOSS-FIX.md
+--- original/DAILY-LOSS-FIX.md	1970-01-01 00:00:00.000000000 +0000
++++ bot/poly-updown-bot-enhanced-V4/DAILY-LOSS-FIX.md	2026-10-02 23:08:51.319291098 +0000
+@@ -0,0 +1,189 @@
++# Fix: "I set the risk circuit breaker to -$300 and it stopped at -$59.67"
++
++**Reported symptom**
++
++> Why does this bot stop trading when it hits the daily loss limit -$59.67? I can
++> see the risk circuit breaker was set to -$300.00 in the dashboard, yet it did
++> not follow through with this rule I set.
++
++**Verdict:** nothing was broken in the sense of a crash — two *different* limits
++were being conflated by the UI, and only one of them was settable from the
++dashboard. The `-$59.67` stop was the daily cap doing its job. The `-$300` you
++typed went somewhere else.
++
++---
++
++## 1. There are two independent loss breakers
++
++`botCore.js → checkRiskLimits()` has always evaluated both, as separate `if`
++statements with separate counters:
++
++| | Stop-loss breaker | Daily loss cap |
++|---|---|---|
++| Config key | `STOP_LOSS_USD` | `MAX_DAILY_LOSS_USD` |
++| Runtime field | `bot.stopLossUsd` | *(was)* `cfg.risk.maxDailyLossUsd` |
++| Counter | `realizedPnl` | `dailyLoss` |
++| Accumulated in | `settlePosition()` — every P&L, win or lose | `settlePosition()` — **losses only** |
++| Semantics | cumulative **net** P&L since the account was reset | **gross** losses in the current UTC day |
++| Resets | only when the paper account is reset | automatically at 00:00 UTC |
++| Stop message | `Stop-loss hit: …` | `Daily loss limit hit: -$…` |
++
++Your `-$59.67` stop carries the second message, so it was the daily cap. Your
++`$300` went into the first control.
++
++## 2. Why the dashboard made that inevitable
++
++The stat tile was labelled generically…
++
++```html
++<span class="stat-label">Risk Circuit Breaker</span>
++<span id="circuitBreaker" class="stat-value">-$25.00</span>
++```
++
++…and rendered the **stop-loss** value, not the daily cap:
++
++```js
++document.getElementById('circuitBreaker').innerText = `-$${(botState.stopLossUsd || 0).toFixed(2)}`;
++```
++
++The only input in the Risk card that looked like a circuit breaker posted
++`stopLossUsd`:
++
++```html
++<label class="form-label">Stop-Loss Circuit Breaker ($ Max Loss)</label>
++```
++
++Meanwhile `maxDailyLossUsd` — the limit that actually stopped you — was
++**unreachable from the UI**:
++
++* it read `cfg.risk.maxDailyLossUsd` straight off the environment (`config.js`);
++* `SETTING_ALIASES` in `botCore.js` had **no key for it**, so a POST carrying
++  `maxDailyLossUsd` came back in `settingsChanges.unapplied` — a silent no-op;
++* the Risk card had no input for it;
++* `saveState()`/`loadState()` did not persist it, so it could not even be
++  inherited across restarts.
++
++So the tile, the label and the input all pointed at the cumulative breaker,
++while the cap that governed your day was a hidden constant in `.env`.
++
++## 3. Why specifically -$59.67, and not -$50.00
++
++Three mechanics compound, all in the settlement path:
++
++1. **Losses are booked per settled position**, not continuously
++   (`botCore.js`: `if (pnl < 0) this.dailyLoss += Math.abs(pnl)`).
++2. **The check runs once per loop tick** (`loopMs` default 750 ms), before any
++   other work in `tick()`.
++3. Therefore the counter can only be tested *after* a loss lands, and it stops at
++   the first tick where the sum has already crossed the limit. The reported
++   figure is the **overshoot**, not the threshold: `$49.50` of losses (still
++   under, so the bot traded on) plus one ~`$10.17` losing trade (a $10 stake plus
++   the 0.07 taker fee) lands at `$59.67` → stop.
++
++It is worth stating plainly: **a stop reported as `-$59.67` is a `$50` cap
++working correctly.** The number in the log is the counter, and it will always
++read a little over the limit. The message now says so.
++
++4. **It is gross, not net.** Winners never reduce `dailyLoss`. A choppy day with
++   wins and losses trips the cap sooner than a net-P&L view would suggest — which
++   is sensible as a *daily* risk control, but means it is not comparable to the
++   stop-loss figure.
++
++5. **"Daily" means UTC.** The rollover is `toISOString().slice(0, 10)`, i.e.
++   00:00 UTC — roughly 10–11 am in Melbourne, not local midnight.
++
++## 4. A second trap, one keystroke away
++
++`updateSettings()` clamped the stop-loss with `Math.max(1, n)`. A user who types
++a literal minus sign — `-300`, copying the `-$300.00` the tile displays — gets
++`Math.max(1, -300) === 1`: a **$1.00** circuit breaker that stops the bot on the
++very next tick, for a reason nobody would guess. (The tile's own output invites
++exactly this input.) `min="1.00"` on the input does not prevent it, because a
++typed value plus `onchange` never consults constraint validation.
++
++The clamp is now `Math.max(1, Math.abs(n))` for both breakers.
++
++---
++
++## 5. What the patch changes
++
++### `botCore.js`
++* `maxDailyLossUsd` added to `SETTING_ALIASES` (aliases: `dailyLossLimitUsd`,
++  `maxDailyLoss`, `dailyLossLimit`) — the daily cap is now a first-class setting.
++* New instance field `this.maxDailyLossUsd` (seeded from `config.risk`), so the
++  dashboard can change it at runtime and so it is independent of `.env`.
++* `checkRiskLimits()` reads `this.maxDailyLossUsd`, and **both** stop messages
++  now name the counter *and* the limit that tripped, including the UTC wording.
++* `Math.abs()` on both `stopLossUsd` and `maxDailyLossUsd` — the `-300 → $1` trap.
++* `saveState()` / `loadState()` persist `maxDailyLossUsd` (the stop-loss already
++  persisted; the daily cap silently reset from `.env` on every restart).
++* `getState()` exposes `maxDailyLossUsd`, `dailyLossPct` and `dailyLossResetAtUtc`
++  so the UI can show progress and the real reset time.
++
++### `public/index.html`
++* The single ambiguous "Risk Circuit Breaker" tile is replaced by three:
++  **Stop-Loss Breaker (cumulative)**, **Daily Loss Cap (UTC day)** with its
++  limit, and **Daily Loss Cap Remaining** with a progress bar.
++* New input **"Max Daily Loss ($ per UTC day)"**, sitting directly under the
++  stop-loss, each explaining how it differs from the other.
++* A **stopped banner** now surfaces `stoppedReason` at the top of the page —
++  previously the reason existed only in the log. It names the breaker that fired
++  and explains what to do about it (raise the cap; the counter is persisted, so a
++  restart alone will not resume trading).
++* A dirty-field set stops the 1.5 s status poll from reverting a value that has
++  been typed but not yet committed.
++
++### `.env.example` / `README.md`
++* The risk section documents the two breakers, the overshoot behaviour, and the
++  fact that a dashboard value supersedes `.env` for the life of the process.
++
++### Tests
++`test/unit.test.js` — 12 new; `test/integration.test.js` — 2 new. Total now
++**92 unit + 11 integration, 0 failures** (was 80 + 9). They cover: the canonical
++and alias keys, rejection of non-numeric input, independence of the two breakers,
++the negative-magnitude regression, runtime override of a stale `.env` value, the
++message naming both counter and limit, cross-breaker isolation, the UTC-only
++rollover, the new state fields, and persistence across a restart.
++
++---
++
++## 6. Reproducing the original bug and the fix
++
++`node proof.js <project-dir> "<label>"` runs the same payload and the same losing
++day against a given checkout:
++
++```
++ORIGINAL — poly-updown-bot-enhanced-V4
++  "Stop-Loss Circuit Breaker" box accepted the $300 ... yes
++  "Max Daily Loss" control accepted the $300 ....... NO  (rejected: ["maxDailyLossUsd"])
++  Daily cap is a runtime setting .................... NO — read live from .env, unreachable from the UI
++  Daily cap the bot actually enforces .............. $50.00
++  After -$59.67 of losses, bot is .................. STOPPED
++  Reason ........................................... Daily loss limit hit: -$59.67
++```
++
++```
++PATCHED — same payload, same losing day
++  "Stop-Loss Circuit Breaker" box accepted the $300 ... yes
++  "Max Daily Loss" control accepted the $300 ....... yes
++  Daily cap is a runtime setting .................... yes
++  Daily cap the bot actually enforces .............. $300.00
++  After -$59.67 of losses, bot is .................. STILL TRADING
++```
++
++---
++
++## 7. Operating notes
++
++* **To get a real $300 daily stop:** set it in the dashboard ("Max Daily Loss"),
++  or `MAX_DAILY_LOSS_USD=300` in `.env` before starting. The dashboard wins.
++* **After a daily-cap stop, restarting does nothing.** `dailyLoss` is persisted
++  in `bot_state.json` and restored on boot, so the bot stops again on the first
++  tick. Either raise the cap above the current counter, or wait for 00:00 UTC.
++  (This is deliberate: a restart should not be a way to lose the day's P&L.)
++* **The cap is gross of wins.** If you want a net-drawdown control for the day,
++  the cumulative stop-loss is the net one — but it never resets on its own.
++* **Where to see it:** the three tiles at the top, the stopped banner, and
++  `GET /api/state` → `{ maxDailyLossUsd, dailyLoss, dailyLossPct, dailyLossResetAtUtc }`.
++* Unchanged: the daily cap does **not** liquidate open positions. It stops new
++  entries; positions already open still settle normally.
+diff -ruN -x node_modules -x '*.log' -x itest_state.json -x bot_state.json -x smoke_state.json original/PATCH-NOTES.md bot/poly-updown-bot-enhanced-V4/PATCH-NOTES.md
+--- original/PATCH-NOTES.md	2026-10-02 23:06:55.051291098 +0000
++++ bot/poly-updown-bot-enhanced-V4/PATCH-NOTES.md	2026-10-02 23:09:09.039291098 +0000
+@@ -83,7 +83,28 @@
+ - **Circuit breakers:** stop-loss, take-profit, **daily loss cap**, cooldown, per-window trade cap, max open positions.
+ - **CORS:** v1 shipped `app.use(cors())` on an API that accepts a private key. v2 binds to `127.0.0.1` and only widens CORS when `DASHBOARD_ORIGIN` is set.
+ - State file records open positions and is reconciled on restart.
+-- `npm run doctor` validates everything end-to-end, and `npm run test:all` (53 unit + 9 integration tests) covers signing, tick maths, sizing, fees, the model, strategy gating, restart persistence and every settlement path.
++- `npm run doctor` validates everything end-to-end, and `npm run test:all` (92 unit + 11 integration tests) covers signing, tick maths, sizing, fees, the model, strategy gating, restart persistence and every settlement path.
++
++## 9b. v2.1 — the daily loss cap is a setting, not a hidden constant
++
++The daily cap **stopped the bot correctly**, but the dashboard gave no way to see
++or change it: it read `MAX_DAILY_LOSS_USD` from the environment, had no settings
++key, no input, and was not persisted. The "Risk Circuit Breaker" tile and input
++both drove the *cumulative* stop-loss, so a user who set `-$300` still got
++stopped by a `-$50` cap and reasonably read it as "my rule was ignored".
++
++- `maxDailyLossUsd` is now a first-class setting: `SETTING_ALIASES` entry,
++  settings handler, instance field, persistence, and validation.
++- Both breakers are labelled, displayed and documented separately, with a
++  "remaining today" tile and progress bar.
++- Stop messages name the counter **and** the limit, and say "UTC day".
++- A stopped banner surfaces `stoppedReason` in the UI (it was log-only) and
++  explains what to do next.
++- `Math.abs()` on both loss limits: typing `-300` used to become a **$1** breaker.
++- `getState()` exposes `maxDailyLossUsd`, `dailyLossPct`, `dailyLossResetAtUtc`.
++
++Details and the reproduction: `DAILY-LOSS-FIX.md`. Run `node proof.js` to see the
++old vs new behaviour side by side.
+ 
+ ## 10. Still on you
+ 
+diff -ruN -x node_modules -x '*.log' -x itest_state.json -x bot_state.json -x smoke_state.json original/README.md bot/poly-updown-bot-enhanced-V4/README.md
+--- original/README.md	2026-10-02 23:06:55.051291098 +0000
++++ bot/poly-updown-bot-enhanced-V4/README.md	2026-10-02 23:08:39.655291098 +0000
+@@ -115,6 +115,17 @@
+   `REQUIRE_GEOBLOCK_PASS=true` the bot refuses to run live from a restricted region.
+ - **Circuit breakers** — `STOP_LOSS_USD`, `MAX_DAILY_LOSS_USD`, `TAKE_PROFIT_USD`,
+   `MAX_OPEN_POSITIONS`, `MAX_TRADES_PER_WINDOW`, per-window cooldown.
++- **Two loss breakers, and they are not the same thing** (see `DAILY-LOSS-FIX.md`):
++
++  | Breaker | Measures | Resets | Dashboard control |
++  |---|---|---|---|
++  | Stop-loss | cumulative **net** realised P&L since the account was reset | never | "Stop-Loss Circuit Breaker" |
++  | Daily loss cap | **gross** realised losses in the current UTC day | 00:00 UTC | "Max Daily Loss" |
++
++  Either one stops the bot, and the stop banner + log name which one fired and
++  what the limit was. The counter overshoots by up to one settled trade, so a
++  stop reported at `-$59.67` against a `$50` cap is working as intended.
++  Both are changeable live from the dashboard without a restart.
+ - **Paper mode is honest** — fills walk the real ladder, pay the real fee, and settle
+   from the real resolution event. Positions that cannot be resolved are left
+   `UNRESOLVED` with a warning rather than guessed.
+diff -ruN -x node_modules -x '*.log' -x itest_state.json -x bot_state.json -x smoke_state.json original/SETTINGS-FIX.md bot/poly-updown-bot-enhanced-V4/SETTINGS-FIX.md
+--- original/SETTINGS-FIX.md	2026-10-02 23:06:55.051291098 +0000
++++ bot/poly-updown-bot-enhanced-V4/SETTINGS-FIX.md	2026-10-02 23:09:13.411291098 +0000
+@@ -191,6 +191,21 @@
+ `4001` auth rejection, `REFERENCE_SOURCE=spot` in `.env` (forces the proxy), or
+ egress blocked to `ws-live-v2.polymarket.com`.
+ 
++---
++
++# Part 4 — the other half of the risk card: the daily loss cap
++
++Same shape as Parts 1 and 2, one layer deeper. The **daily cap** (`MAX_DAILY_LOSS_USD`)
++did stop the bot — but it had no settings key, no dashboard input, and no
++persistence, while the only control that *looked* like a circuit breaker drove the
++cumulative stop-loss instead. An operator who set `-$300` therefore got stopped by
++a hidden `-$50` env value and had no way to tell why.
++
++Fixed in the same manner as the rest of this document: a `SETTING_ALIASES` entry
++(`maxDailyLossUsd` + three aliases), a validated handler, persistence, separate
++labelling in the UI, and a stop message that names the counter *and* the limit.
++Full write-up: **`DAILY-LOSS-FIX.md`**.
++
+ ## Test totals
+ 
+-80 unit + 9 integration, 0 failures (+5 new for the settlement feed).
++92 unit + 11 integration, 0 failures (+12 unit and +2 integration for the daily cap).
+diff -ruN -x node_modules -x '*.log' -x itest_state.json -x bot_state.json -x smoke_state.json original/botCore.js bot/poly-updown-bot-enhanced-V4/botCore.js
+--- original/botCore.js	2026-10-02 23:06:55.051291098 +0000
++++ bot/poly-updown-bot-enhanced-V4/botCore.js	2026-10-02 23:07:20.611291098 +0000
+@@ -38,6 +38,14 @@
+   tradeAmountUsd: ['tradeAmountUsd', 'stakeUsd', 'tradeAmount'],
+   maxTradeAmountUsd: ['maxTradeAmountUsd', 'maxStakeUsd', 'maxTrade', 'maxTradeCap'],
+   stopLossUsd: ['stopLossUsd', 'stopLossThresholdUsd', 'stopLoss'],
++  // Second stop-*family* breaker, and a different one: `stopLossUsd` watches
++  // cumulative net P&L since the account was reset, `maxDailyLossUsd` watches
++  // *gross* realised losses inside the current UTC day. Before this key
++  // existed the daily cap was reachable only through the MAX_DAILY_LOSS_USD
++  // env var, so the dashboard's "Risk Circuit Breaker" box (which posts
++  // stopLossUsd) silently controlled the cumulative limit instead — and the
++  // daily cap stopped the bot anyway, reporting a number the user never set.
++  maxDailyLossUsd: ['maxDailyLossUsd', 'dailyLossLimitUsd', 'maxDailyLoss', 'dailyLossLimit'],
+   kellySizing: ['kellySizing', 'kelly'],
+   paperMode: ['paperMode', 'paper'],
+   selectedTimeframe: ['selectedTimeframe', 'timeframe'],
+@@ -79,6 +87,10 @@
+     this.maxTradeAmountUsd = config.order.maxStakeUsd;
+     this.kellySizing = config.order.kellySizing;
+     this.stopLossUsd = config.risk.stopLossUsd;
++    // The per-UTC-day loss cap. Instance state (not read straight off `cfg`)
++    // so the dashboard can change it at runtime and so it survives a restart
++    // via bot_state.json, exactly like the stop-loss above.
++    this.maxDailyLossUsd = config.risk.maxDailyLossUsd;
+     this.takeProfitUsd = config.risk.takeProfitUsd;
+     this.cooldownSeconds = config.risk.cooldownSeconds;
+     // Dashboard-selected timeframe + market target (both are now actually
+@@ -382,17 +394,37 @@
+     return true;
+   }
+ 
++  /**
++   * The two loss breakers are deliberately independent:
++   *
++   *   stopLossUsd      vs realizedPnl  — cumulative NET P&L since the account
++   *                                      was reset. Never resets daily.
++   *   maxDailyLossUsd  vs dailyLoss    — GROSS realised losses inside the
++   *                                      current UTC day (winners do not
++   *                                      offset losers). Resets at 00:00 UTC.
++   *
++   * Both messages name the limit that tripped, because "stop: -$59.67" is
++   * meaningless when the configured limit was $50 — the counter overshoots by
++   * one settled trade (losses are booked per position, and this runs once per
++   * loop tick), so the reported figure is the overshoot, not the threshold.
++   */
+   checkRiskLimits() {
+     if (this.realizedPnl <= -Math.abs(this.stopLossUsd)) {
+-      this.stop(`Stop-loss hit: realised P&L $${this.realizedPnl.toFixed(2)}`);
++      this.stop(
++        `Stop-loss hit: cumulative realised P&L $${this.realizedPnl.toFixed(2)} `
++        + `(limit -$${Math.abs(this.stopLossUsd).toFixed(2)})`,
++      );
+       return false;
+     }
+     if (this.takeProfitUsd > 0 && this.realizedPnl >= Math.abs(this.takeProfitUsd)) {
+       this.stop(`Take-profit hit: realised P&L $${this.realizedPnl.toFixed(2)}`);
+       return false;
+     }
+-    if (this.dailyLoss >= this.cfg.risk.maxDailyLossUsd) {
+-      this.stop(`Daily loss limit hit: -$${this.dailyLoss.toFixed(2)}`);
++    if (this.dailyLoss >= this.maxDailyLossUsd) {
++      this.stop(
++        `Daily loss limit hit: -$${this.dailyLoss.toFixed(2)} of -$${this.maxDailyLossUsd.toFixed(2)} `
++        + `allowed today (gross realised losses, UTC day)`,
++      );
+       return false;
+     }
+     return true;
+@@ -781,6 +813,7 @@
+       if (d.tradeAmountUsd !== undefined) this.tradeAmountUsd = d.tradeAmountUsd;
+       if (d.maxTradeAmountUsd !== undefined) this.maxTradeAmountUsd = d.maxTradeAmountUsd;
+       if (d.stopLossUsd !== undefined) this.stopLossUsd = d.stopLossUsd;
++      if (d.maxDailyLossUsd !== undefined) this.maxDailyLossUsd = Math.max(1, Math.abs(d.maxDailyLossUsd));
+       if (d.kellySizing !== undefined) this.kellySizing = d.kellySizing;
+       if (d.paperMode !== undefined) this.paperMode = d.paperMode;
+       if (d.strategies) this.strategies.setEnabledMap(d.strategies);
+@@ -813,6 +846,7 @@
+         tradeAmountUsd: this.tradeAmountUsd,
+         maxTradeAmountUsd: this.maxTradeAmountUsd,
+         stopLossUsd: this.stopLossUsd,
++        maxDailyLossUsd: this.maxDailyLossUsd,
+         kellySizing: this.kellySizing,
+         paperMode: this.paperMode,
+         dailyLoss: this.dailyLoss,
+@@ -875,10 +909,20 @@
+     if (next.stopLossUsd !== undefined) {
+       const n = num('stopLossUsd', next.stopLossUsd);
+       if (n !== null) {
+-        this.stopLossUsd = Math.max(1, n);
++        // Math.abs: the input is a *magnitude*. A typed "-300" means "300";
++        // the previous Math.max(1, -300) silently made a $300 breaker a $1 one,
++        // which stops the bot on the next tick for no visible reason.
++        this.stopLossUsd = Math.max(1, Math.abs(n));
+         applied.push({ key: 'stopLossUsd', value: this.stopLossUsd });
+       }
+     }
++    if (next.maxDailyLossUsd !== undefined) {
++      const n = num('maxDailyLossUsd', next.maxDailyLossUsd);
++      if (n !== null) {
++        this.maxDailyLossUsd = Math.max(1, Math.abs(n));
++        applied.push({ key: 'maxDailyLossUsd', value: this.maxDailyLossUsd });
++      }
++    }
+     if (next.paperMode !== undefined) {
+       this.paperMode = !!next.paperMode;
+       this.auth.setPaperMode(this.paperMode);
+@@ -967,11 +1011,18 @@
+       tradeAmountUsd: this.tradeAmountUsd,
+       maxTradeAmountUsd: this.maxTradeAmountUsd,
+       stopLossUsd: this.stopLossUsd,
++      maxDailyLossUsd: this.maxDailyLossUsd,
+       kellySizing: this.kellySizing,
+       paperBalance: +this.paperBalance.toFixed(2),
+       startingBalance: this.startingBalance,
+       realizedPnl: +this.realizedPnl.toFixed(2),
++      // Gross realised losses for the current UTC day, and when that counter
++      // rolls over — "daily" here is 00:00 UTC, not local midnight.
+       dailyLoss: +this.dailyLoss.toFixed(2),
++      dailyLossPct: this.maxDailyLossUsd > 0
++        ? +Math.min(100, (this.dailyLoss / this.maxDailyLossUsd) * 100).toFixed(1)
++        : 0,
++      dailyLossResetAtUtc: `${this.dailyKey}T00:00:00.000Z`,
+       totalTrades: this.totalTrades,
+       winningTrades: this.winningTrades,
+       losingTrades: this.losingTrades,
+diff -ruN -x node_modules -x '*.log' -x itest_state.json -x bot_state.json -x smoke_state.json original/package.json bot/poly-updown-bot-enhanced-V4/package.json
+--- original/package.json	2026-10-02 23:06:55.051291098 +0000
++++ bot/poly-updown-bot-enhanced-V4/package.json	2026-10-02 23:09:17.235291098 +0000
+@@ -1,6 +1,6 @@
+ {
+   "name": "poly-updown-bot-patched",
+-  "version": "2.0.0",
++  "version": "2.1.0",
+   "description": "BTC Up/Down automated trading bot for Polymarket (global) - patched for real CLOB trading",
+   "main": "server.js",
+   "scripts": {
+diff -ruN -x node_modules -x '*.log' -x itest_state.json -x bot_state.json -x smoke_state.json original/proof.js bot/poly-updown-bot-enhanced-V4/proof.js
+--- original/proof.js	1970-01-01 00:00:00.000000000 +0000
++++ bot/poly-updown-bot-enhanced-V4/proof.js	2026-10-02 23:08:58.095291098 +0000
+@@ -0,0 +1,70 @@
++'use strict';
++/**
++ * Proof: the same dashboard payload and the same losing day, run against the
++ * original code and the patched code.
++ *
++ *   node proof.js                        # this checkout
++ *   node proof.js <path-to-project> "<label>"   # compare against another
++ *
++ * Scenario: the user sets the dashboard stop-loss to -$300, then has a losing
++ * day whose gross losses reach $59.67 in a single settled trade (the counter
++ * overshoots the $50 env cap — losses are booked per position, and the check
++ * runs once per loop tick).
++ */
++const path = require('path');
++const os = require('os');
++
++const dir = path.resolve(process.argv[2] || __dirname);
++const label = process.argv[3] || dir;
++
++const { CONFIG } = require(path.join(dir, 'config.js'));
++const { BotCore } = require(path.join(dir, 'botCore.js'));
++
++function scenario() {
++  // Rebuild the config the way the user's .env has it (the shipped default).
++  const cfg = JSON.parse(JSON.stringify(CONFIG));
++  cfg.risk.maxDailyLossUsd = 50;
++  cfg.risk.stopLossUsd = 25;
++  cfg.runtime.stateFile = path.join(os.tmpdir(), `proof-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
++
++  const bot = new BotCore({
++    config: cfg,
++    auth: { setPaperMode() {}, getStatus: () => ({}) },
++    log: () => {},
++  });
++
++  // 1. The operator types 300 into the dashboard's "Risk Circuit Breaker" box.
++  const applied = bot.updateSettings({ stopLossUsd: 300 });
++
++  // 2. They ask for a $300 daily cap too (the control the patch adds).
++  const applied2 = bot.updateSettings({ maxDailyLossUsd: 300 });
++
++  // 3. A losing day: gross realised losses reach $59.67.
++  bot.isRunning = true;
++  bot.dailyLoss = 59.67;
++  bot.realizedPnl = -59.67;
++
++  // 4. The risk check runs on the next loop tick (every 750 ms).
++  const stillTrading = bot.checkRiskLimits();
++
++  return {
++    accepted_cumulative_stop_loss: applied.settingsChanges.applied.find(a => a.key === 'stopLossUsd') || null,
++    daily_cap_setting_accepted: applied2.settingsChanges.applied.find(a => a.key === 'maxDailyLossUsd') || null,
++    daily_cap_payload_rejected: applied2.settingsChanges.unapplied,
++    // Original code has no instance property at all: it reads cfg.risk.* live.
++    effective_daily_cap: bot.maxDailyLossUsd !== undefined ? bot.maxDailyLossUsd : bot.cfg.risk.maxDailyLossUsd,
++    cap_is_runtime_setting: bot.maxDailyLossUsd !== undefined,
++    still_trading_after_59_67_loss: stillTrading && bot.isRunning,
++    stopped_reason: bot.stoppedReason,
++  };
++}
++
++const r = scenario();
++console.log(`\n${'='.repeat(74)}\n  ${label}\n${'='.repeat(74)}`);
++console.log(`  "Stop-Loss Circuit Breaker" box accepted the $300 ... ${r.accepted_cumulative_stop_loss ? 'yes' : 'NO'}`);
++console.log(`  "Max Daily Loss" control accepted the $300 ....... ${r.daily_cap_setting_accepted ? 'yes' : `NO  (rejected: ${JSON.stringify(r.daily_cap_payload_rejected)})`}`);
++console.log(`  Daily cap is a runtime setting .................... ${r.cap_is_runtime_setting ? 'yes' : 'NO — read live from .env, unreachable from the UI'}`);
++console.log(`  Daily cap the bot actually enforces .............. $${r.effective_daily_cap.toFixed(2)}`);
++console.log(`  After -$59.67 of losses, bot is .................. ${r.still_trading_after_59_67_loss ? 'STILL TRADING' : 'STOPPED'}`);
++if (r.stopped_reason) console.log(`  Reason ........................................... ${r.stopped_reason}`);
++console.log('');
+diff -ruN -x node_modules -x '*.log' -x itest_state.json -x bot_state.json -x smoke_state.json original/public/index.html bot/poly-updown-bot-enhanced-V4/public/index.html
+--- original/public/index.html	2026-10-02 23:06:55.051291098 +0000
++++ bot/poly-updown-bot-enhanced-V4/public/index.html	2026-10-02 23:07:49.039291098 +0000
+@@ -322,6 +322,13 @@
+     <button class="btn btn-sm" style="margin-left:10px; background:#374151; color:#e5e7eb;" onclick="runDiagnostics()">Run diagnostics</button>
+   </div>
+ 
++  <!-- Why the bot is not trading (a circuit breaker, a geoblock, …) -->
++  <div id="stoppedBanner" style="display:none; background: rgba(239,68,68,0.12); border: 1px solid #ef4444; border-radius: 10px; padding: 12px 16px; margin-bottom: 14px;">
++    <strong style="color:#f87171;">⏸ Bot stopped:</strong>
++    <span id="stoppedText" style="color:#fca5a5; font-size: 13px;"></span>
++    <div id="stoppedHint" style="color:#9ca3af; font-size: 12px; margin-top: 6px;"></div>
++  </div>
++
+   <!-- Top Metrics Bar -->
+   <div class="stats-grid">
+     <div class="stat-card">
+@@ -343,9 +350,24 @@
+     </div>
+ 
+     <div class="stat-card">
+-      <span class="stat-label">Risk Circuit Breaker</span>
++      <span class="stat-label">Stop-Loss Breaker (cumulative)</span>
+       <span id="circuitBreaker" class="stat-value" style="color: #f59e0b;">-$25.00</span>
+-      <span class="stat-sub">Stops automatically on threshold</span>
++      <span id="circuitBreakerSub" class="stat-sub">Cumulative net P&amp;L stop · not a daily limit</span>
++    </div>
++
++    <div class="stat-card">
++      <span class="stat-label">Daily Loss Cap (UTC day)</span>
++      <span id="dailyLossBreaker" class="stat-value" style="color: #f59e0b;">-$0.00</span>
++      <span id="dailyLossBreakerSub" class="stat-sub">Gross losses today · limit -$50.00</span>
++    </div>
++
++    <div class="stat-card">
++      <span class="stat-label">Daily Loss Cap Remaining</span>
++      <span id="dailyLossRemaining" class="stat-value" style="color: #34d399;">$50.00</span>
++      <span id="dailyLossRemainingSub" class="stat-sub">Resets 00:00 UTC</span>
++      <div style="margin-top: 8px; height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden;">
++        <div id="dailyLossBar" style="height: 100%; width: 0%; background: #34d399; border-radius: 3px;"></div>
++      </div>
+     </div>
+   </div>
+ 
+@@ -540,8 +562,14 @@
+ 
+           <div class="form-group">
+             <label class="form-label">Stop-Loss Circuit Breaker ($ Max Loss)</label>
+-            <input type="number" id="cfgStopLoss" class="form-control" value="25.00" min="1.00" step="1.00" onchange="updateSettings()">
+-            <span style="font-size: 11px; color: var(--text-muted);">Automatically pauses the bot if cumulative realized losses reach this amount.</span>
++            <input type="number" id="cfgStopLoss" class="form-control" value="25.00" min="1.00" step="1.00" onchange="markDirty('cfgStopLoss'); updateSettings()">
++            <span style="font-size: 11px; color: var(--text-muted);">Automatically pauses the bot if <strong>cumulative realized losses</strong> reach this amount. This is a lifetime-of-the-account figure — it does <em>not</em> reset daily. See <em>Max Daily Loss</em> below for the per-day cap.</span>
++          </div>
++
++          <div class="form-group">
++            <label class="form-label">Max Daily Loss ($ per UTC day)</label>
++            <input type="number" id="cfgMaxDailyLoss" class="form-control" value="50.00" min="1.00" step="1.00" onchange="markDirty('cfgMaxDailyLoss'); updateSettings()">
++            <span style="font-size: 11px; color: var(--text-muted);">Second, independent breaker: pauses the bot once <strong>gross realized losses for the current UTC day</strong> reach this amount, even if the cumulative stop-loss above has not triggered. Winners do not offset it, and the day rolls over at <strong>00:00 UTC</strong> — not local midnight. Absent from the UI before this patch: the only way to set it was <code>MAX_DAILY_LOSS_USD</code> in <code>.env</code>.</span>
+           </div>
+ 
+           <div class="form-group">
+@@ -757,9 +785,21 @@
+    * `stopLossThresholdUsd`, which no handler ever looked at, so the stop-loss
+    * could not be changed from the UI at all.
+    */
++  /**
++   * Fields the user is mid-edit on. `document.activeElement` alone is not
++   * enough: a value that is changed but not yet committed (no blur, no Enter)
++   * is still a change the user expects to keep, and the 1.5s status poll would
++   * otherwise snap it back to server state.
++   */
++  const dirtyFields = new Set();
++  function markDirty(id) { dirtyFields.add(id); }
++  function clearDirty(id) { dirtyFields.delete(id); }
++  window.markDirty = markDirty;
++
+   async function updateSettings() {
+     const tradeEl = document.getElementById('cfgTradeAmount');
+     const stopEl = document.getElementById('cfgStopLoss');
++    const dailyEl = document.getElementById('cfgMaxDailyLoss');
+     const tfEl = document.getElementById('timeframeSelect');
+     const marketEl = document.getElementById('cfgMarketFilter');
+     const kellyEl = document.getElementById('cfgKellySizing');
+@@ -768,6 +808,7 @@
+     const payload = {};
+     if (tradeEl && tradeEl.value !== '') payload.tradeAmountUsd = parseFloat(tradeEl.value);
+     if (stopEl && stopEl.value !== '') payload.stopLossUsd = parseFloat(stopEl.value);
++    if (dailyEl && dailyEl.value !== '') payload.maxDailyLossUsd = parseFloat(dailyEl.value);
+     if (tfEl) payload.selectedTimeframe = tfEl.value;
+     if (marketEl) payload.selectedMarketSlug = marketEl.value;
+     if (kellyEl) payload.kellySizing = kellyEl.checked;
+@@ -784,6 +825,20 @@
+       if (!data.ok) throw new Error(data.error || 'request failed');
+       const ch = data.state && data.state.settingsChanges;
+       if (ch && ch.unapplied && ch.unapplied.length) showSettingsWarning(ch.unapplied);
++      // A field is no longer "mid-edit" once the server has accepted it. Fields
++      // it refused stay dirty so the poll cannot hide what the user typed.
++      const FIELD_OF_KEY = {
++        tradeAmountUsd: 'cfgTradeAmount',
++        stopLossUsd: 'cfgStopLoss',
++        maxDailyLossUsd: 'cfgMaxDailyLoss',
++        maxTradeAmountUsd: 'cfgMaxTrade',
++        kellySizing: 'cfgKellySizing',
++        selectedTimeframe: 'timeframeSelect',
++        selectedMarketSlug: 'cfgMarketFilter',
++      };
++      for (const a of (ch && ch.applied) || []) {
++        if (FIELD_OF_KEY[a.key]) clearDirty(FIELD_OF_KEY[a.key]);
++      }
+     } catch (e) {
+       console.error('Failed to save settings:', e.message);
+       showSettingsWarning(['could not reach the bot — ' + e.message]);
+@@ -928,7 +983,65 @@
+ 
+     document.getElementById('winRate').innerText = `${botState.winRate}%`;
+     document.getElementById('tradeCountSub').innerText = `${botState.winningTrades} wins / ${botState.losingTrades} losses (${botState.totalTrades} total)`;
++    // Surface the stop reason, and say which limit tripped. Previously this
++    // existed only in `stoppedReason`/the log, so an operator who set a $300
++    // stop-loss had no way to see that a $50 daily cap was what fired.
++    const stoppedBanner = document.getElementById('stoppedBanner');
++    if (stoppedBanner) {
++      if (botState.stoppedReason && !botState.isRunning) {
++        stoppedBanner.style.display = 'block';
++        document.getElementById('stoppedText').innerText = botState.stoppedReason;
++        const sub = document.getElementById('stoppedHint');
++        if (/Daily loss limit/i.test(botState.stoppedReason)) {
++          sub.innerText = `This is the per-UTC-day cap (Max Daily Loss = -$${(botState.maxDailyLossUsd || 0).toFixed(2)}), not the cumulative stop-loss. The counter is ${(botState.dailyLoss || 0) >= (botState.maxDailyLossUsd || 0) ? 'persisted in bot_state.json, so restarting will stop again immediately' : 'under the limit'} and resets at 00:00 UTC. Raising the cap above takes effect on the next tick — no restart needed.`;
++        } else if (/Stop-loss/i.test(botState.stoppedReason)) {
++          sub.innerText = `This is the cumulative net-P&L breaker (limit -$${(botState.stopLossUsd || 0).toFixed(2)}); it does not reset daily. The separate daily cap is -$${(botState.maxDailyLossUsd || 0).toFixed(2)}.`;
++        } else {
++          sub.innerText = '';
++        }
++      } else {
++        stoppedBanner.style.display = 'none';
++      }
++    }
++
++    // Two independent breakers, shown separately. Labelling only the stop-loss
++    // as "Risk Circuit Breaker" is what made a $50 daily cap look like a
++    // $300 stop-loss that had been ignored.
+     document.getElementById('circuitBreaker').innerText = `-$${(botState.stopLossUsd || 0).toFixed(2)}`;
++    const cbSubEl = document.getElementById('circuitBreakerSub');
++    if (cbSubEl) {
++      cbSubEl.innerText = `Cumulative net P&L stop · now $${(botState.realizedPnl || 0).toFixed(2)}`;
++      cbSubEl.style.color = botState.realizedPnl <= -(botState.stopLossUsd || 0) ? '#f87171' : '';
++    }
++
++    const dlEl = document.getElementById('dailyLossBreaker');
++    if (dlEl) {
++      dlEl.innerText = `-$${(botState.dailyLoss || 0).toFixed(2)}`;
++      dlEl.style.color = (botState.dailyLoss || 0) >= (botState.maxDailyLossUsd || 0) ? '#f87171' : '#f59e0b';
++    }
++    const dlSubEl = document.getElementById('dailyLossBreakerSub');
++    if (dlSubEl) {
++      dlSubEl.innerText = `Gross losses today (UTC) · limit -$${(botState.maxDailyLossUsd || 0).toFixed(2)}`;
++    }
++    const dlRemEl = document.getElementById('dailyLossRemaining');
++    if (dlRemEl) {
++      const remaining = Math.max(0, (botState.maxDailyLossUsd || 0) - (botState.dailyLoss || 0));
++      dlRemEl.innerText = `$${remaining.toFixed(2)}`;
++      dlRemEl.style.color = remaining <= 0 ? '#f87171' : remaining < (botState.maxDailyLossUsd || 0) * 0.34 ? '#f59e0b' : '#34d399';
++      const remSubEl = document.getElementById('dailyLossRemainingSub');
++      if (remSubEl) {
++        const reset = botState.dailyLossResetAtUtc ? new Date(botState.dailyLossResetAtUtc) : null;
++        remSubEl.innerText = reset && !isNaN(reset)
++          ? `Resets ${reset.toLocaleString()} (local time)`
++          : 'Resets 00:00 UTC';
++      }
++      const barEl = document.getElementById('dailyLossBar');
++      if (barEl) {
++        const pct = Math.min(100, Math.max(0, botState.dailyLossPct || 0));
++        barEl.style.width = pct + '%';
++        barEl.style.background = pct >= 100 ? '#f87171' : pct >= 66 ? '#f59e0b' : '#34d399';
++      }
++    }
+ 
+     // Sync strategy toggles from persisted state and show live module activity.
+     // Reading straight off the server's canonical keys is what makes a toggle
+@@ -976,6 +1089,7 @@
+       const el = document.getElementById(id);
+       if (!el || value === undefined || value === null) return;
+       if (document.activeElement === el) return;         // never fight typing
++      if (dirtyFields.has(id)) return;                   // changed, not yet committed
+       if (kind === 'checkbox') { el.checked = !!value; return; }
+       if (kind === 'number') { el.value = Number(value).toFixed(2); return; }
+       // <select>: assigning a value with no matching <option> silently blanks
+@@ -984,6 +1098,7 @@
+     };
+     syncField('cfgTradeAmount', botState.tradeAmountUsd, 'number');
+     syncField('cfgStopLoss', botState.stopLossUsd, 'number');
++    syncField('cfgMaxDailyLoss', botState.maxDailyLossUsd, 'number');
+     syncField('cfgMaxTrade', botState.maxTradeAmountUsd, 'number');
+     syncField('cfgKellySizing', botState.kellySizing, 'checkbox');
+     syncField('timeframeSelect', botState.selectedTimeframe, 'select');
+diff -ruN -x node_modules -x '*.log' -x itest_state.json -x bot_state.json -x smoke_state.json original/test/integration.test.js bot/poly-updown-bot-enhanced-V4/test/integration.test.js
+--- original/test/integration.test.js	2026-10-02 23:06:55.051291098 +0000
++++ bot/poly-updown-bot-enhanced-V4/test/integration.test.js	2026-10-02 23:08:03.263291098 +0000
+@@ -142,6 +142,30 @@
+     assert.match(bot.stoppedReason, /Stop-loss/);
+   });
+ 
++  await t('daily loss cap halts the bot at its own limit, not the stop-loss', async () => {
++    const bot = freshBot();
++    bot.isRunning = true;
++    bot.stopLossUsd = 300;        // the cumulative breaker is far away
++    bot.maxDailyLossUsd = 50;     // the daily cap is what should fire
++    bot.realizedPnl = -59.67;     // recorded as a run of losses
++    bot.dailyLoss = 59.67;        // overshot by one settled trade — expected
++    const ok = bot.checkRiskLimits();
++    assert.strictEqual(ok, false);
++    assert.strictEqual(bot.isRunning, false);
++    assert.match(bot.stoppedReason, /Daily loss limit/);
++    assert.match(bot.stoppedReason, /59\.67/);
++    assert.match(bot.stoppedReason, /50\.00/);
++  });
++
++  await t('a daily cap set from the dashboard takes effect on the next check', async () => {
++    const bot = freshBot();
++    bot.isRunning = true;
++    bot.dailyLoss = 59.67;
++    bot.updateSettings({ maxDailyLossUsd: 300 });
++    assert.strictEqual(bot.checkRiskLimits(), true, 'must run again once the cap is raised');
++    assert.strictEqual(bot.isRunning, true);
++  });
++
+   await t('paper fills pay the published taker fee', async () => {
+     const bot = freshBot();
+     // fee per share = 0.07 * p * (1-p); 20 shares at 0.50 → 0.0175/share
+diff -ruN -x node_modules -x '*.log' -x itest_state.json -x bot_state.json -x smoke_state.json original/test/unit.test.js bot/poly-updown-bot-enhanced-V4/test/unit.test.js
+--- original/test/unit.test.js	2026-10-02 23:06:55.051291098 +0000
++++ bot/poly-updown-bot-enhanced-V4/test/unit.test.js	2026-10-02 23:07:59.723291098 +0000
+@@ -691,6 +691,144 @@
+     assert.strictEqual(bot.kellySizing, true);
+   });
+ 
++  // ------------------------------------------------- daily loss cap (regression)
++  // The daily cap (`MAX_DAILY_LOSS_USD`) had NO settings key and NO dashboard
++  // control: it read `cfg.risk.maxDailyLossUsd` straight from .env, while the
++  // "Risk Circuit Breaker" box controlled the *cumulative* stop-loss. A user who
++  // set $300 saw the bot stop at "-$59.67" (the $50 env default, overshot by one
++  // settled trade) with no way to change it from the UI.
++  section('Daily loss cap (independent breaker)');
++
++  test('daily cap applies from the canonical dashboard key', () => {
++    const bot = makeBot();
++    bot.updateSettings({ maxDailyLossUsd: 300 });
++    assert.strictEqual(bot.maxDailyLossUsd, 300);
++  });
++
++  test('daily cap applies from the dashboard alias key', () => {
++    const bot = makeBot();
++    bot.updateSettings({ dailyLossLimitUsd: 120 });
++    assert.strictEqual(bot.maxDailyLossUsd, 120, 'alias must drive maxDailyLossUsd');
++  });
++
++  test('daily cap rejects a non-numeric value instead of writing NaN', () => {
++    const bot = makeBot();
++    const before = bot.maxDailyLossUsd;
++    const state = bot.updateSettings({ maxDailyLossUsd: 'lots' });
++    assert.strictEqual(bot.maxDailyLossUsd, before);
++    assert.ok(state.settingsChanges.unapplied.some(u => /maxDailyLossUsd/.test(u)));
++  });
++
++  test('the two breakers are independent settings', () => {
++    const bot = makeBot();
++    bot.updateSettings({ stopLossUsd: 300, maxDailyLossUsd: 50 });
++    assert.strictEqual(bot.stopLossUsd, 300, 'stop-loss is the cumulative breaker');
++    assert.strictEqual(bot.maxDailyLossUsd, 50, 'daily cap must not be touched by it');
++    bot.updateSettings({ stopLossUsd: 25 });
++    assert.strictEqual(bot.maxDailyLossUsd, 50, 'daily cap must survive a stop-loss change');
++  });
++
++  test('a negative magnitude is read as positive, not clamped to 1', () => {
++    // Regression: Math.max(1, -300) === 1, which turned a $300 breaker into a
++    // $1 one — stopping the bot on the very next tick.
++    const bot = makeBot();
++    bot.updateSettings({ stopLossUsd: -300 });
++    assert.strictEqual(bot.stopLossUsd, 300, '"-300" means a $300 limit');
++    bot.updateSettings({ maxDailyLossUsd: -300 });
++    assert.strictEqual(bot.maxDailyLossUsd, 300, '"-300" means a $300 daily cap');
++  });
++
++  test('daily cap applies at runtime, ignoring the .env value', () => {
++    const bot = makeBot({ risk: { maxDailyLossUsd: 50 } }); // .env says 50
++    bot.updateSettings({ maxDailyLossUsd: 300 });           // dashboard says 300
++    bot.isRunning = true;
++    bot.dailyLoss = 59.67;
++    assert.strictEqual(bot.checkRiskLimits(), true, 'must NOT stop at the stale .env limit');
++    bot.dailyLoss = 300;
++    assert.strictEqual(bot.checkRiskLimits(), false, 'must stop at the runtime limit');
++    assert.match(bot.stoppedReason, /Daily loss limit/);
++  });
++
++  test('the daily breaker names BOTH the counter and the limit', () => {
++    const bot = makeBot({ risk: { maxDailyLossUsd: 50 } });
++    bot.isRunning = true;
++    bot.dailyLoss = 59.67;  // overshot by one settled losing trade
++    bot.realizedPnl = -59.67;
++    bot.stopLossUsd = 300;  // the user's "that should have been $300" setting
++    bot.checkRiskLimits();
++    assert.match(bot.stoppedReason, /59\.67/, 'the actual counter belongs in the message');
++    assert.match(bot.stoppedReason, /50\.00/, 'so does the limit that tripped');
++    assert.match(bot.stoppedReason, /UTC/);
++  });
++
++  test('breakers do not fire against each other\'s counters', () => {
++    // Big cumulative drawdown, no losses *today* → the daily cap must stay quiet.
++    const bot = makeBot();
++    bot.isRunning = true;
++    bot.realizedPnl = -10;
++    bot.dailyLoss = 0;
++    assert.strictEqual(bot.checkRiskLimits(), true);
++    // Losses today but a huge cumulative allowance → only the daily cap fires.
++    const bot2 = makeBot();
++    bot2.isRunning = true;
++    bot2.stopLossUsd = 10000;
++    bot2.maxDailyLossUsd = 100;
++    bot2.realizedPnl = -120;
++    bot2.dailyLoss = 120;
++    bot2.checkRiskLimits();
++    assert.match(bot2.stoppedReason, /Daily loss limit/);
++    assert.doesNotMatch(bot2.stoppedReason, /Stop-loss/);
++  });
++
++  test('the daily counter resets on the UTC day rollover only', () => {
++    const bot = makeBot();
++    bot.dailyLoss = 42;
++    bot.dailyKey = new Date().toISOString().slice(0, 10);
++    bot.rollDailyCounters();
++    assert.strictEqual(bot.dailyLoss, 42, 'same UTC day must keep the counter');
++    bot.dailyKey = '2020-01-01';
++    bot.rollDailyCounters();
++    assert.strictEqual(bot.dailyLoss, 0, 'a new UTC day resets it');
++  });
++
++  test('state exposes both breakers plus the daily reset time', () => {
++    const bot = makeBot({ risk: { maxDailyLossUsd: 100 } });
++    bot.dailyLoss = 25;
++    const s = bot.getState();
++    assert.strictEqual(s.maxDailyLossUsd, 100);
++    assert.strictEqual(s.dailyLoss, 25);
++    assert.strictEqual(s.dailyLossPct, 25, 'progress toward the cap, for the UI bar');
++    assert.match(s.dailyLossResetAtUtc, /^\d{4}-\d{2}-\d{2}T00:00:00\.000Z$/);
++  });
++
++  test('the daily cap survives a save/load roundtrip', () => {
++    const bot = makeBot();
++    bot.updateSettings({ maxDailyLossUsd: 275 });
++    const file = bot.stateFile;
++
++    const bot2 = makeBot();
++    bot2.stateFile = file;
++    bot2.loadState();
++    assert.strictEqual(bot2.maxDailyLossUsd, 275, 'dashboard cap must persist across restarts');
++    require('fs').unlinkSync(file);
++  });
++
++  test('the whole dashboard payload applies, including the daily cap', () => {
++    const bot = makeBot();
++    const state = bot.updateSettings({
++      tradeAmountUsd: 10,
++      stopLossUsd: 300,
++      maxDailyLossUsd: 150,
++      kellySizing: false,
++      maxTradeAmountUsd: 25,
++      selectedTimeframe: '5m',
++      selectedMarketSlug: 'auto',
++    });
++    assert.deepStrictEqual(state.settingsChanges.unapplied, []);
++    assert.strictEqual(state.settingsChanges.applied.length, 7);
++    assert.strictEqual(bot.maxDailyLossUsd, 150);
++  });
++
+   // -------------------------------------------------------------- live guards
+   section('Live-mode guards');
+   test('wallet validation rejects funder == signer for smart-wallet types', () => {
