@@ -1,0 +1,1679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Poly Up Down Bot - Polymarket BTC Trading Terminal</title>
+  <style>
+    :root {
+      --bg: #0b0e14;
+      --card-bg: #151a23;
+      --card-border: #242c3d;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --accent: #10b981;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --code-bg: #1a2230;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { background-color: var(--bg); color: var(--text); line-height: 1.5; font-size: 14px; padding-bottom: 40px; }
+
+    /* Header */
+    header {
+      background: #111622;
+      border-bottom: 1px solid var(--card-border);
+      padding: 12px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-icon {
+      width: 34px; height: 34px; border-radius: 8px;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 18px; color: #fff;
+    }
+    .brand-title { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+    .brand-subtitle { font-size: 11px; color: var(--text-muted); }
+    .status-badge {
+      display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600;
+    }
+    .status-running { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.4); }
+    .status-stopped { background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.4); }
+    .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background-color: currentColor; }
+    .status-running .pulse-dot { animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0% { opacity: 0.4; } 50% { opacity: 1; } 100% { opacity: 0.4; } }
+
+    /* Main Container */
+    .container { max-width: 1440px; margin: 20px auto; padding: 0 20px; display: flex; flex-direction: column; gap: 20px; }
+
+    /* Top Stats Grid */
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
+    .stat-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+    .stat-value { font-size: 24px; font-weight: 700; }
+    .stat-sub { font-size: 12px; color: var(--text-muted); }
+
+    /* Main Grid Layout */
+    .grid-2col { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+    @media (max-width: 1024px) { .grid-2col { grid-template-columns: 1fr; } }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .card-header {
+      padding: 14px 18px;
+      background: rgba(255, 255, 255, 0.02);
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .card-title { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+    .card-body { padding: 18px; }
+
+    /* Live Prices Ticker Bar */
+    .price-strip {
+      display: flex; gap: 20px; align-items: center; flex-wrap: wrap;
+      background: #111722; padding: 10px 16px; border-radius: 8px; border: 1px solid #1f2737;
+    }
+    .ticker-item { display: flex; align-items: center; gap: 8px; }
+    .ticker-name { font-weight: 600; color: var(--text-muted); font-size: 12px; }
+    .ticker-price { font-weight: 700; font-family: monospace; font-size: 14px; }
+    .badge-pill { padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+
+    /* Markets Table */
+    .market-row {
+      display: grid;
+      grid-template-columns: 1.5fr 1fr 1.2fr 1.2fr 1fr;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--card-border);
+      align-items: center;
+      transition: background 0.15s;
+    }
+    .market-row:hover { background: rgba(255, 255, 255, 0.02); }
+    .market-row:last-child { border-bottom: none; }
+    .market-row.header { font-size: 11px; text-transform: uppercase; color: var(--text-muted); font-weight: 600; background: rgba(0,0,0,0.2); }
+
+    /* Controls & Buttons */
+    .btn {
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: none;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: opacity 0.15s, transform 0.05s;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary { background: var(--primary); color: white; }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-success { background: var(--accent); color: white; }
+    .btn-danger { background: var(--danger); color: white; }
+    .btn-secondary { background: #242c3d; color: var(--text); }
+    .btn-secondary:hover { background: #2f3a4f; }
+    .btn-sm { padding: 4px 8px; font-size: 11px; }
+
+    /* Forms */
+    .form-group { margin-bottom: 14px; }
+    .form-label { display: block; font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; }
+    .form-control {
+      width: 100%;
+      background: var(--code-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      color: var(--text);
+      font-size: 13px;
+    }
+    .form-control:focus { outline: none; border-color: var(--primary); }
+
+    /* Strategy Toggle */
+    .strategy-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 12px;
+      background: #121822;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      border: 1px solid #1c2433;
+    }
+    .strategy-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .strategy-title { font-weight: 600; font-size: 13px; }
+    .strategy-desc { font-size: 11px; color: var(--text-muted); }
+    .strategy-stat {
+      font-size: 10px;
+      color: var(--text-muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      margin-top: 3px;
+      overflow-wrap: anywhere;
+    }
+    .strategy-stat .stat-off { color: #6b7280; font-style: italic; }
+    .strategy-stat .stat-fired.hot { color: #34d399; }
+    .strategy-stat .stat-reason { opacity: 0.75; }
+    /* A disabled module is visibly inert, so a toggle has an obvious effect. */
+    .strategy-item.disabled { opacity: 0.45; }
+    .strategy-item.disabled .strategy-title { text-decoration: line-through; }
+    .settings-warning {
+      margin-top: 10px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      background: rgba(248, 113, 113, 0.12);
+      border: 1px solid rgba(248, 113, 113, 0.35);
+      color: #f87171;
+      overflow-wrap: anywhere;
+    }
+
+    .strategy-count {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 10px;
+      background: rgba(52, 211, 153, 0.15);
+      color: #34d399;
+    }
+    .strategy-count.partial { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+    .strategy-count.none { background: rgba(248, 113, 113, 0.15); color: #f87171; }
+
+    /* Log Console */
+    .log-box {
+      background: #090c10;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+      height: 180px;
+      overflow-y: auto;
+      padding: 10px;
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 4px;
+    }
+    .log-line { display: flex; gap: 8px; line-height: 1.4; }
+    .log-time { color: var(--text-muted); flex-shrink: 0; }
+    .log-INFO { color: #60a5fa; }
+    .log-SUCCESS { color: #34d399; }
+    .log-WARN { color: #fbbf24; }
+    .log-ERROR { color: #f87171; }
+
+    /* Position / Trade Table */
+    .trade-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .trade-table th { text-align: left; padding: 8px; color: var(--text-muted); border-bottom: 1px solid var(--card-border); }
+    .trade-table td { padding: 8px; border-bottom: 1px solid #1a2230; }
+
+    /* Switch */
+    .switch {
+      position: relative; display: inline-block; width: 38px; height: 20px;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #374151; transition: .2s; border-radius: 20px;
+    }
+    .slider:before {
+      position: absolute; content: ""; height: 14px; width: 14px; left: 3px; bottom: 3px;
+      background-color: white; transition: .2s; border-radius: 50%;
+    }
+    input:checked + .slider { background-color: var(--accent); }
+    input:checked + .slider:before { transform: translateX(18px); }
+
+    /* Modals & tabs */
+    .tab-nav { display: flex; gap: 8px; border-bottom: 1px solid var(--card-border); padding-bottom: 10px; margin-bottom: 14px; }
+    .tab-btn {
+      background: none; border: none; color: var(--text-muted); padding: 6px 12px; cursor: pointer;
+      font-size: 13px; font-weight: 600; border-radius: 4px;
+    }
+    .tab-btn.active { color: white; background: #242c3d; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-icon">⚡</div>
+    <div>
+      <div class="brand-title">Poly Up Down Bot</div>
+      <div class="brand-subtitle">Polymarket Bitcoin Up/Down Automated Terminal</div>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 14px;">
+    <div id="statusBadge" class="status-badge status-stopped">
+      <span class="pulse-dot"></span>
+      <span id="statusText">BOT STOPPED</span>
+    </div>
+
+    <button id="toggleBotBtn" class="btn btn-success" onclick="toggleBot()">
+      ▶ Start Bot
+    </button>
+  </div>
+</header>
+
+<div class="container">
+  <!-- Real-time Feeds Ticker -->
+  <div class="price-strip">
+    <div class="ticker-item">
+      <span class="ticker-name">BTC / USD Spot:</span>
+      <span id="spotBtcPrice" class="ticker-price" style="color: #60a5fa; font-size: 16px;">$--,---.--</span>
+    </div>
+    <div class="ticker-item">
+      <span class="ticker-name">Coinbase:</span>
+      <span id="coinbasePrice" class="ticker-price">$--</span>
+    </div>
+    <div class="ticker-item">
+      <span class="ticker-name">Kraken:</span>
+      <span id="krakenPrice" class="ticker-price">$--</span>
+    </div>
+    <div class="ticker-item">
+      <span class="ticker-name">TWAP-60 (settlement):</span>
+      <span id="twapPrice" class="ticker-price" style="color: #a78bfa;">$--</span>
+      <span id="twapSourceBadge" class="badge-pill" style="background: rgba(148,163,184,0.2); color: #94a3b8; font-size: 10px;">--</span>
+    </div>
+    <div class="ticker-item">
+      <span class="ticker-name">Price to beat:</span>
+      <span id="priceToBeat" class="badge-pill" style="background: #1e293b;">--</span>
+    </div>
+    <div class="ticker-item">
+      <span class="ticker-name">1m Momentum:</span>
+      <span id="mom1m" class="badge-pill" style="background: #1e293b;">--</span>
+    </div>
+    <div class="ticker-item">
+      <span class="ticker-name">RSI (14):</span>
+      <span id="rsiValue" class="badge-pill" style="background: #1e293b;">--</span>
+    </div>
+    <div class="ticker-item" style="margin-left: auto;">
+      <span class="ticker-name">Trading Mode:</span>
+      <span id="tradingModeBadge" class="badge-pill" style="background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid #3b82f6;">PAPER TEST MODE</span>
+    </div>
+  </div>
+
+  <!-- Geoblock / configuration banners -->
+  <div id="geoblockBanner" style="display:none; background: rgba(239,68,68,0.12); border: 1px solid #ef4444; border-radius: 10px; padding: 12px 16px; margin-bottom: 14px;">
+    <strong style="color:#f87171;">⛔ Geoblocked:</strong>
+    <span id="geoblockText" style="color:#fca5a5; font-size: 13px;"></span>
+  </div>
+  <div id="configBanner" style="display:none; background: rgba(245,158,11,0.10); border: 1px solid #f59e0b; border-radius: 10px; padding: 12px 16px; margin-bottom: 14px;">
+    <strong style="color:#fbbf24;">⚠ Setup needed:</strong>
+    <span id="configText" style="color:#fcd34d; font-size: 13px;"></span>
+    <button class="btn btn-sm" style="margin-left:10px; background:#374151; color:#e5e7eb;" onclick="runDiagnostics()">Run diagnostics</button>
+  </div>
+
+  <!-- Why the bot is not trading (a circuit breaker, a geoblock, …) -->
+  <div id="stoppedBanner" style="display:none; background: rgba(239,68,68,0.12); border: 1px solid #ef4444; border-radius: 10px; padding: 12px 16px; margin-bottom: 14px;">
+    <strong style="color:#f87171;">⏸ Bot stopped:</strong>
+    <span id="stoppedText" style="color:#fca5a5; font-size: 13px;"></span>
+    <div id="stoppedHint" style="color:#9ca3af; font-size: 12px; margin-top: 6px;"></div>
+  </div>
+
+  <!-- Top Metrics Bar -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <span class="stat-label">Paper Account Balance</span>
+      <span id="accountBalance" class="stat-value" style="color: #34d399;">$1,000.00</span>
+      <span class="stat-sub">Starting Bankroll: $1,000.00</span>
+    </div>
+
+    <div class="stat-card">
+      <span class="stat-label">Total Realized P&L</span>
+      <span id="realizedPnl" class="stat-value">$0.00</span>
+      <span id="pnlPercent" class="stat-sub">0.00% return</span>
+    </div>
+
+    <div class="stat-card">
+      <span class="stat-label">Win Rate & Trades</span>
+      <span id="winRate" class="stat-value">0.0%</span>
+      <span id="tradeCountSub" class="stat-sub">0 wins / 0 losses (0 total)</span>
+    </div>
+
+    <div class="stat-card">
+      <span class="stat-label">Stop-Loss Breaker (cumulative)</span>
+      <span id="circuitBreaker" class="stat-value" style="color: #f59e0b;">-$25.00</span>
+      <span id="circuitBreakerSub" class="stat-sub">Cumulative net P&amp;L stop · not a daily limit</span>
+    </div>
+
+    <div class="stat-card">
+      <span class="stat-label">Daily Loss Cap (UTC day)</span>
+      <span id="dailyLossBreaker" class="stat-value" style="color: #f59e0b;">-$0.00</span>
+      <span id="dailyLossBreakerSub" class="stat-sub">Gross losses today · limit -$50.00</span>
+    </div>
+
+    <div class="stat-card">
+      <span class="stat-label">Daily Loss Cap Remaining</span>
+      <span id="dailyLossRemaining" class="stat-value" style="color: #34d399;">$50.00</span>
+      <span id="dailyLossRemainingSub" class="stat-sub">Resets 00:00 UTC</span>
+      <div style="margin-top: 8px; height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden;">
+        <div id="dailyLossBar" style="height: 100%; width: 0%; background: #34d399; border-radius: 3px;"></div>
+      </div>
+    </div>
+
+    <!--
+      Capital recycling. These two cards exist because the failure mode they
+      report is otherwise invisible: realised P&L rises, the tradeable balance
+      falls, and the bot quietly stops placing orders. If P&L is up while
+      "Tradeable collateral" is down, wins are being locked into tokens.
+    -->
+    <div class="stat-card">
+      <span class="stat-label">Capital Recycled (pre-expiry sells)</span>
+      <span id="exitRecycled" class="stat-value" style="color: #34d399;">$0.00</span>
+      <span id="exitRecycledSub" class="stat-sub">0 sells · 0.00 shares · $0.00 fees</span>
+      <div style="margin-top: 8px; height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden;">
+        <div id="exitStatusBar" style="height: 100%; width: 0%; background: #94a3b8; border-radius: 3px;"></div>
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <span class="stat-label">Redemption Sweeper</span>
+      <span id="redeemStatus" class="stat-value" style="color: #94a3b8;">—</span>
+      <span id="redeemStatusSub" class="stat-sub">checking…</span>
+    </div>
+
+    <div class="stat-card">
+      <span class="stat-label">Tradeable Collateral</span>
+      <span id="collateralBalance" class="stat-value" style="color: #34d399;">$0.00</span>
+      <span id="collateralSub" class="stat-sub">what the order path can actually spend</span>
+    </div>
+  </div>
+
+  <!-- 2 Column Layout -->
+  <div class="grid-2col">
+    <!-- Left Column: Markets & Positions -->
+    <div style="display: flex; flex-direction: column; gap: 20px;">
+      <!-- Active Bitcoin Up/Down Markets -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>🎯</span> Polymarket BTC Up/Down Prediction Markets
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <select id="timeframeSelect" class="form-control" style="width: auto; padding: 4px 8px; font-size: 12px;" onchange="updateSettings()">
+              <option value="5m">BTC 5-Minute Markets</option>
+              <option value="15m">BTC 15-Minute Markets</option>
+              <option value="all">All BTC Up/Down Markets</option>
+            </select>
+            <button class="btn btn-secondary btn-sm" onclick="fetchMarkets()">🔄 Refresh</button>
+          </div>
+        </div>
+        <div class="card-body" style="padding: 0;">
+          <div class="market-row header">
+            <div>Market Window</div>
+            <div>Time Remaining</div>
+            <div>Up Odds</div>
+            <div>Down Odds</div>
+            <div>Action</div>
+          </div>
+          <div id="marketsList">
+            <div style="padding: 20px; text-align: center; color: var(--text-muted);">Scanning Polymarket Gamma API for active windows...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Active Positions -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>📈</span> Active Open Positions (<span id="openPosCount">0</span>)
+          </div>
+        </div>
+        <div class="card-body" style="padding: 0;">
+          <table class="trade-table">
+            <thead>
+              <tr>
+                <th>Market</th>
+                <th>Side</th>
+                <th>Shares</th>
+                <th>Avg Fill</th>
+                <th>Cost + Fee</th>
+                <th>Status</th>
+                <th>Strategy / Model</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="openPositionsBody">
+              <tr>
+                <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 20px;">No open positions currently active. Bot will snipe edges according to active strategies.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Closed Trades History -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>📜</span> Realized Trade History & PnL
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="resetPaperBalance()">Reset Paper History</button>
+        </div>
+        <div class="card-body" style="padding: 0;">
+          <table class="trade-table">
+            <thead>
+              <tr>
+                <th>Market</th>
+                <th>Side</th>
+                <th>Strategy</th>
+                <th>Avg Fill</th>
+                <th>Cost + Fee</th>
+                <th>Payout</th>
+                <th>P&L (fee-aware)</th>
+              </tr>
+            </thead>
+            <tbody id="tradeHistoryBody">
+              <tr>
+                <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 20px;">No trades recorded yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Terminal Logs -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>📟</span> Terminal Execution Logs
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="log-box" id="logBox">
+            <div class="log-line"><span class="log-time">[Startup]</span> <span class="log-INFO">Poly Up Down Bot initialized and ready.</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Column: Settings, Strategies, Authentication -->
+    <div style="display: flex; flex-direction: column; gap: 20px;">
+      
+      <!-- Google / Polymarket Authentication -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>🔑</span> Polymarket / Google Auth
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="tab-nav">
+            <button class="tab-btn active" onclick="switchAuthTab('overview')">Account Overview</button>
+            <button class="tab-btn" onclick="switchAuthTab('credentials')">Credentials Setup</button>
+          </div>
+
+          <div id="authOverviewTab">
+            <div style="display: flex; flex-direction: column; gap: 10px; font-size: 13px;">
+              <div style="display: flex; justify-content: space-between;">
+                <span style="color: var(--text-muted);">Sign-in Method:</span>
+                <span id="authEmail" style="font-weight: 600;">Google / Magic Link</span>
+              </div>
+              <div style="display: flex; justify-content: space-between;">
+                <span style="color: var(--text-muted);">Funder (Proxy) Address:</span>
+                <span id="authFunder" style="font-family: monospace; font-size: 11px;">Not configured</span>
+              </div>
+              <div style="display: flex; justify-content: space-between;">
+                <span style="color: var(--text-muted);">Signature Type:</span>
+                <span id="authSigType" style="font-weight: 600;">not configured</span>
+              </div>
+              <div style="display: flex; justify-content: space-between;">
+                <span style="color: var(--text-muted);">Live On-chain USDC:</span>
+                <span id="liveUsdcBal" style="font-weight: 600; color: #34d399;">$0.00 USDC</span>
+              </div>
+
+              <div style="margin-top: 10px; padding: 10px; background: rgba(59, 130, 246, 0.1); border-radius: 6px; border: 1px solid rgba(59, 130, 246, 0.2); font-size: 12px;">
+                💡 <strong>Google Email Sign-in Note:</strong> Polymarket accounts created with Google sign-in use a Magic Link proxy wallet. To trade live, export your private key from Polymarket Settings &rarr; Export Private Key and enter it in Credentials Setup.
+              </div>
+            </div>
+          </div>
+
+          <div id="authCredentialsTab" style="display: none;">
+            <div class="form-group">
+              <label class="form-label">Google / Polymarket Email</label>
+              <input type="email" id="cfgEmail" class="form-control" placeholder="user@gmail.com">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Polymarket Private Key (0x...)</label>
+              <input type="password" id="cfgPrivateKey" class="form-control" placeholder="0x...exported from Polymarket Settings">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Account Wallet Address (profile menu &rarr; copy address)</label>
+              <input type="text" id="cfgFunder" class="form-control" placeholder="0x... deposit wallet / proxy / safe">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Wallet Type</label>
+              <select id="cfgSigType" class="form-control">
+                <option value="3" selected>3 — Deposit Wallet (accounts created on/after 2026-05-04)</option>
+                <option value="1">1 — POLY_PROXY (legacy Google / Magic Link)</option>
+                <option value="2">2 — GNOSIS_SAFE (legacy MetaMask / Rabby)</option>
+                <option value="0">0 — EOA (imported key)</option>
+              </select>
+            </div>
+            <button class="btn btn-primary" style="width: 100%;" onclick="saveAuthCredentials()">Save & Verify Live Account</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bot Risk & Execution Settings -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>⚙️</span> Risk & Order Parameters
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">Trading Environment</label>
+            <div style="display: flex; gap: 10px;">
+              <button id="modePaperBtn" class="btn btn-primary btn-sm" style="flex: 1;" onclick="setPaperMode(true)">Paper Testing (Risk Free)</button>
+              <button id="modeLiveBtn" class="btn btn-secondary btn-sm" style="flex: 1;" onclick="setPaperMode(false)">Live Real Balance</button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Dollar Amount Per Trade ($ USD)</label>
+            <input type="number" id="cfgTradeAmount" class="form-control" value="2.00" min="1.00" step="0.50" onchange="updateSettings()">
+            <span style="font-size: 11px; color: var(--text-muted);">Polymarket enforces a minimum of <strong>5 shares</strong> per order (not "$1.00"). At 60c a 5-share order costs $3.00 — if your stake buys fewer, the bot raises the stake to the minimum (MIN_ORDER_POLICY=bump) or skips the trade (skip).</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Stop-Loss Circuit Breaker ($ Max Loss)</label>
+            <input type="number" id="cfgStopLoss" class="form-control" value="25.00" min="1.00" step="1.00" onchange="markDirty('cfgStopLoss'); updateSettings()">
+            <span style="font-size: 11px; color: var(--text-muted);">Automatically pauses the bot if <strong>cumulative realized losses</strong> reach this amount. This is a lifetime-of-the-account figure — it does <em>not</em> reset daily. See <em>Max Daily Loss</em> below for the per-day cap.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Max Daily Loss ($ per UTC day)</label>
+            <input type="number" id="cfgMaxDailyLoss" class="form-control" value="50.00" min="1.00" step="1.00" onchange="markDirty('cfgMaxDailyLoss'); updateSettings()">
+            <span style="font-size: 11px; color: var(--text-muted);">Second, independent breaker: pauses the bot once <strong>gross realized losses for the current UTC day</strong> reach this amount, even if the cumulative stop-loss above has not triggered. Winners do not offset it, and the day rolls over at <strong>00:00 UTC</strong> — not local midnight. Absent from the UI before this patch: the only way to set it was <code>MAX_DAILY_LOSS_USD</code> in <code>.env</code>.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" style="display: flex; align-items: center; gap: 10px;">
+              <input type="checkbox" id="cfgKellySizing" onchange="updateSettings()" style="width: auto;">
+              Kelly Stake Sizing (¼-Kelly, model-probability driven)
+            </label>
+            <span style="font-size: 11px; color: var(--text-muted);">When a strategy supplies a model probability, stakes scale with edge (¼-Kelly) instead of a flat amount.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Max Trade Cap with Kelly ($ USD)</label>
+            <input type="number" id="cfgMaxTrade" class="form-control" value="25.00" min="1.00" step="1.00" onchange="updateSettings()">
+            <span style="font-size: 11px; color: var(--text-muted);">Upper bound for Kelly-sized positions.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Market Target Filter</label>
+            <select id="cfgMarketFilter" class="form-control" onchange="updateSettings()">
+              <option value="auto">Auto-Select Next Expiring Market</option>
+            </select>
+          </div>
+
+          <div id="settingsWarning" class="settings-warning" style="display: none;"></div>
+        </div>
+      </div>
+
+      <!-- Capital recycling: exits + redemption -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>♻️</span> Capital Recycling <span class="strategy-count" id="recyclingCount">—</span>
+          </div>
+        </div>
+        <div class="card-body">
+          <div id="recyclingWarning" class="settings-warning" style="display:none; margin-bottom:12px;"></div>
+
+          <div class="form-group">
+            <label class="form-label" style="display: flex; align-items: center; gap: 10px;">
+              <input type="checkbox" id="cfgExitEnabled" onchange="updateSettings()" style="width: auto;">
+              Pre-expiry exit — sell a decided position before the window closes
+            </label>
+            <span style="font-size: 11px; color: var(--text-muted);" id="exitConfigSummary">—</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" style="display: flex; align-items: center; gap: 10px;">
+              <input type="checkbox" id="cfgAutoRedeem" onchange="updateSettings()" style="width: auto;">
+              Auto-redeem sweeper — claim resolved wins back into collateral
+            </label>
+            <span style="font-size: 11px; color: var(--text-muted);" id="redeemConfigSummary">—</span>
+          </div>
+
+          <div style="display: flex; gap: 10px; margin-top: 4px;">
+            <button class="btn btn-secondary btn-sm" style="flex:1;" onclick="forceRedeem()">Redeem now</button>
+            <button class="btn btn-secondary btn-sm" style="flex:1;" onclick="forceExits()">Evaluate exits now</button>
+          </div>
+
+          <div style="margin-top: 12px; font-size: 11px; color: var(--text-muted); line-height: 1.55;">
+            <strong>Why both are on by default.</strong> Polymarket's CLOB has no redemption endpoint, and
+            <code>GET /balance-allowance</code> reports <em>collateral only</em> — winning shares are ERC-1155
+            tokens that do not count toward it. A bot that only ever buys converts its whole float into
+            unredeemable tokens and then stops trading while realised P&amp;L keeps rising.
+            The <strong>exit</strong> recycles capital in the same tick (selling at ~99c costs ~1c, and the
+            taker fee at that price is ~0.07c/share); the <strong>sweeper</strong> collects whatever the exit
+            could not act on. Turning both off in live mode will strand your balance.
+          </div>
+
+          <div id="exitPositionsBox" style="display:none; margin-top:12px;">
+            <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:6px;">
+              Still exposed to resolution
+            </div>
+            <div id="exitPositionsList" style="font-size:11px; font-family:monospace; color:#cbd5e1;"></div>
+          </div>
+
+          <div id="redeemHistoryBox" style="display:none; margin-top:12px;">
+            <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:6px;">
+              Recent redemptions
+            </div>
+            <div id="redeemHistoryList" style="font-size:11px; font-family:monospace; color:#cbd5e1; max-height:120px; overflow-y:auto;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Trading Strategy Modules -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>🧠</span> Strategy Modules
+            <span class="strategy-count" id="strategyCount">8/8 enabled</span>
+          </div>
+        </div>
+        <div class="card-body">
+          <!-- Latency Exploitation -->
+          <div class="strategy-item" data-strategy="latencyExploitation">
+            <div class="strategy-meta">
+              <span class="strategy-title">1. Latency Exploitation</span>
+              <span class="strategy-desc">Settlement-series momentum: trades when the 60s TWAP moves decisively vs the price to beat (≥1.25σ) and the book has not repriced. Spot prints alone are ignored.</span>
+              <span class="strategy-stat" id="stat-latencyExploitation">—</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="stratLatency" data-strategy="latencyExploitation" checked onchange="updateStrategySettings()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Late Window Convergence -->
+          <div class="strategy-item" data-strategy="lateWindowConvergence">
+            <div class="strategy-meta">
+              <span class="strategy-title">2. Late Window Convergence</span>
+              <span class="strategy-desc">Final 180s only: buys when the TWAP model is ≥88% and the ask is still below 95c, so the taker fee stays small.</span>
+              <span class="strategy-stat" id="stat-lateWindowConvergence">—</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="stratLateWindow" data-strategy="lateWindowConvergence" checked onchange="updateStrategySettings()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Microstructure Edges -->
+          <div class="strategy-item" data-strategy="microstructure">
+            <div class="strategy-meta">
+              <span class="strategy-title">3. Microstructure Edges</span>
+              <span class="strategy-desc">Live-book depth imbalance (≥1.8x, ≥$250 depth) — but only in the direction the TWAP model already agrees with.</span>
+              <span class="strategy-stat" id="stat-microstructure">—</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="stratMicrostructure" data-strategy="microstructure" checked onchange="updateStrategySettings()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- RSI Reversion -->
+          <div class="strategy-item" data-strategy="rsiReversion">
+            <div class="strategy-meta">
+              <span class="strategy-title">4. RSI Trend & Reversion</span>
+              <span class="strategy-desc">RSI(14) on the reference series, only tradeable when the TWAP model confirms (an RSI extreme cannot move an accrued 60s average on its own).</span>
+              <span class="strategy-stat" id="stat-rsiReversion">—</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="stratRsi" data-strategy="rsiReversion" checked onchange="updateStrategySettings()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Fair-Value EV Pricing -->
+          <div class="strategy-item" data-strategy="fairValueEv">
+            <div class="strategy-meta">
+              <span class="strategy-title">5. Fair-Value EV Pricing</span>
+              <span class="strategy-desc">Core model: P(Up) from the 60s Chainlink TWAP, the price to beat and remaining-window volatility. Buys either side priced ≥3c below fair value, net of the 7% crypto taker fee.</span>
+              <span class="strategy-stat" id="stat-fairValueEv">—</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="stratFairValue" data-strategy="fairValueEv" checked onchange="updateStrategySettings()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Cross-Exchange Divergence -->
+          <div class="strategy-item" data-strategy="crossExchange">
+            <div class="strategy-meta">
+              <span class="strategy-title">6. Cross-Exchange Divergence</span>
+              <span class="strategy-desc">Spot lead-lag (≥$12, both feeds <2.5s old) direction-gated by the TWAP model — a divergent quote on a venue that does not settle the market is a trap without model agreement.</span>
+              <span class="strategy-stat" id="stat-crossExchange">—</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="stratCrossExchange" data-strategy="crossExchange" checked onchange="updateStrategySettings()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Volatility Breakout -->
+          <div class="strategy-item" data-strategy="volatilityBreakout">
+            <div class="strategy-meta">
+              <span class="strategy-title">7. Volatility Breakout</span>
+              <span class="strategy-desc">Bollinger burst (90s, 2σ) + 15s thrust, only while ≥90s remain so the move can still reach the closing TWAP average.</span>
+              <span class="strategy-stat" id="stat-volatilityBreakout">—</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="stratVolBreakout" data-strategy="volatilityBreakout" checked onchange="updateStrategySettings()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Stale-Quote Snipe -->
+          <div class="strategy-item" data-strategy="staleQuoteSnipe">
+            <div class="strategy-meta">
+              <span class="strategy-title">8. Stale-Quote Snipe</span>
+              <span class="strategy-desc">Final 25s: buys ≥96.5% model-certain outcomes still offered ≤93c. At 93c the fee is only 0.46c/share, so a 1c edge is real.</span>
+              <span class="strategy-stat" id="stat-staleQuoteSnipe">—</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="stratStaleSnipe" data-strategy="staleQuoteSnipe" checked onchange="updateStrategySettings()">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+  let botState = {};
+  let currentMarkets = [];
+
+  // Strategy reason strings originate from live market data; never interpolate
+  // them into innerHTML unescaped.
+  function escapeHtml(str) {
+    return String(str === undefined || str === null ? '' : str).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+  }
+
+  async function fetchStatus() {
+    try {
+      const res = await fetch('/api/state');
+      botState = await res.json();
+      renderState();
+    } catch (e) {
+      console.error('Error fetching state:', e);
+    }
+  }
+
+  async function fetchMarkets() {
+    try {
+      const res = await fetch('/api/markets');
+      const data = await res.json();
+      currentMarkets = data.markets || [];
+      renderMarkets();
+    } catch (e) {
+      console.error('Error fetching markets:', e);
+    }
+  }
+
+  async function toggleBot() {
+    const action = botState.isRunning ? 'stop' : 'start';
+    try {
+      const res = await fetch(`/api/bot/${action}`, { method: 'POST' });
+      const data = await res.json();
+      fetchStatus();
+    } catch (e) {
+      alert('Failed to toggle bot: ' + e.message);
+    }
+  }
+
+  /** Force a redemption sweep outside the timer (e.g. right after a big win). */
+  async function forceRedeem() {
+    try {
+      const res = await fetch('/api/redeem/run', { method: 'POST' });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'sweep refused');
+      const r = data.result || {};
+      alert(r.reason
+        ? `Redemption sweep: ${r.reason}`
+        : `Redemption sweep: ${r.redeemed || 0} redeemed, ${r.failed || 0} failed, ${r.skipped || 0} skipped`);
+    } catch (e) {
+      alert('Redemption sweep failed: ' + e.message);
+    }
+    fetchStatus();
+  }
+
+  /** Run one exit evaluation pass immediately instead of waiting for the loop. */
+  async function forceExits() {
+    try {
+      const res = await fetch('/api/exit/run', { method: 'POST' });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'exit pass refused');
+      alert(data.reason || `Exit pass complete: ${data.exited || 0} position(s) sold`);
+    } catch (e) {
+      alert('Exit pass failed: ' + e.message);
+    }
+    fetchStatus();
+  }
+
+  async function setPaperMode(isPaper) {
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paperMode: isPaper })
+    });
+    fetchStatus();
+  }
+
+  // Show the user when a value was refused by the bot instead of failing silently.
+  function showSettingsWarning(items) {
+    const el = document.getElementById('settingsWarning');
+    if (!el) return;
+    if (!items || !items.length) { el.style.display = 'none'; el.textContent = ''; return; }
+    el.style.display = 'block';
+    el.textContent = 'Not applied: ' + items.join(', ');
+  }
+
+  /**
+   * Send the risk / order parameters.
+   *
+   * `stopLossUsd` is the key the server reads — the dashboard used to post
+   * `stopLossThresholdUsd`, which no handler ever looked at, so the stop-loss
+   * could not be changed from the UI at all.
+   */
+  /**
+   * Fields the user is mid-edit on. `document.activeElement` alone is not
+   * enough: a value that is changed but not yet committed (no blur, no Enter)
+   * is still a change the user expects to keep, and the 1.5s status poll would
+   * otherwise snap it back to server state.
+   */
+  const dirtyFields = new Set();
+  function markDirty(id) { dirtyFields.add(id); }
+  function clearDirty(id) { dirtyFields.delete(id); }
+  window.markDirty = markDirty;
+
+  async function updateSettings() {
+    const tradeEl = document.getElementById('cfgTradeAmount');
+    const stopEl = document.getElementById('cfgStopLoss');
+    const dailyEl = document.getElementById('cfgMaxDailyLoss');
+    const tfEl = document.getElementById('timeframeSelect');
+    const marketEl = document.getElementById('cfgMarketFilter');
+    const kellyEl = document.getElementById('cfgKellySizing');
+    const maxTradeEl = document.getElementById('cfgMaxTrade');
+
+    const payload = {};
+    if (tradeEl && tradeEl.value !== '') payload.tradeAmountUsd = parseFloat(tradeEl.value);
+    if (stopEl && stopEl.value !== '') payload.stopLossUsd = parseFloat(stopEl.value);
+    if (dailyEl && dailyEl.value !== '') payload.maxDailyLossUsd = parseFloat(dailyEl.value);
+    if (tfEl) payload.selectedTimeframe = tfEl.value;
+    if (marketEl) payload.selectedMarketSlug = marketEl.value;
+    if (kellyEl) payload.kellySizing = kellyEl.checked;
+    if (maxTradeEl && maxTradeEl.value !== '') payload.maxTradeAmountUsd = parseFloat(maxTradeEl.value);
+    const exitEl = document.getElementById('cfgExitEnabled');
+    const redeemEl = document.getElementById('cfgAutoRedeem');
+    if (exitEl) payload.exitEnabled = exitEl.checked;
+    if (redeemEl) payload.autoRedeem = redeemEl.checked;
+
+    showSettingsWarning([]);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'request failed');
+      const ch = data.state && data.state.settingsChanges;
+      if (ch && ch.unapplied && ch.unapplied.length) showSettingsWarning(ch.unapplied);
+      // A field is no longer "mid-edit" once the server has accepted it. Fields
+      // it refused stay dirty so the poll cannot hide what the user typed.
+      const FIELD_OF_KEY = {
+        tradeAmountUsd: 'cfgTradeAmount',
+        stopLossUsd: 'cfgStopLoss',
+        maxDailyLossUsd: 'cfgMaxDailyLoss',
+        maxTradeAmountUsd: 'cfgMaxTrade',
+        kellySizing: 'cfgKellySizing',
+        selectedTimeframe: 'timeframeSelect',
+        selectedMarketSlug: 'cfgMarketFilter',
+      };
+      for (const a of (ch && ch.applied) || []) {
+        if (FIELD_OF_KEY[a.key]) clearDirty(FIELD_OF_KEY[a.key]);
+      }
+    } catch (e) {
+      console.error('Failed to save settings:', e.message);
+      showSettingsWarning(['could not reach the bot — ' + e.message]);
+    }
+    fetchStatus();
+  }
+
+  /**
+   * Send the module toggles.
+   *
+   * Keys here must be the engine's canonical names — previously the dashboard
+   * sent `latencyExploit` / `microstructureEdges` / `crossExchangeDivergence`,
+   * which matched no module and were silently discarded.
+   */
+  async function updateStrategySettings() {
+    const strategies = {};
+    for (const el of document.querySelectorAll('.strategy-item input[data-strategy]')) {
+      strategies[el.dataset.strategy] = { enabled: el.checked };
+    }
+
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategies })
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'request failed');
+      const ch = data.state && data.state.strategyChanges;
+      if (ch && ch.unknown && ch.unknown.length) {
+        console.warn('Unrecognised strategy keys:', ch.unknown);
+      }
+    } catch (e) {
+      console.error('Failed to save strategy settings:', e.message);
+    }
+    fetchStatus();
+  }
+
+  async function manualTrade(slug, side) {
+    if (!confirm(`Are you sure you want to manually buy ${side} on ${slug} for $${botState.tradeAmountUsd}?`)) return;
+    try {
+      const res = await fetch('/api/trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ marketSlug: slug, side })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        fetchStatus();
+      } else {
+        alert(data.error);
+      }
+    } catch (e) {
+      alert(e.message);
+    }
+  }
+
+  async function resetPaperBalance() {
+    if (confirm('Reset paper test balance to $1,000.00 and clear history?')) {
+      await fetch('/api/bot/reset', { method: 'POST' });
+      fetchStatus();
+    }
+  }
+
+  async function saveAuthCredentials() {
+    const email = document.getElementById('cfgEmail').value;
+    const privateKey = document.getElementById('cfgPrivateKey').value;
+    const funderAddress = document.getElementById('cfgFunder').value;
+    const signatureType = Number(document.getElementById('cfgSigType').value);
+
+    try {
+      const res = await fetch('/api/auth/configure', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, privateKey, funderAddress, signatureType, derive: true })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        const funder = data.auth && data.auth.accountWalletFull ? data.auth.accountWalletFull : funderAddress;
+        const bal = await fetch('/api/auth/balance').then(r => r.json()).catch(() => null);
+        const desc = data.derived
+          ? 'CLOB credentials created/derived for the signer.'
+          : 'Existing credentials kept.';
+        const b = bal && bal.ok && bal.balance !== undefined ? `Reported collateral balance: ${Number(bal.balance).toFixed(2)}` : 'Balance could not be read — check the terminal log.';
+        alert('Saved.\n\n' + desc + '\nAccount wallet: ' + funder + '\n' + b);
+        switchAuthTab('overview');
+        fetchStatus();
+      } else {
+        alert('Error: ' + data.error);
+      }
+    } catch (e) {
+      alert('Error: ' + e.message);
+    }
+  }
+
+  function switchAuthTab(tab) {
+    document.querySelectorAll('.tab-btn').forEach((b, i) => {
+      b.classList.toggle('active', (tab === 'overview' && i === 0) || (tab === 'credentials' && i === 1));
+    });
+    document.getElementById('authOverviewTab').style.display = tab === 'overview' ? 'block' : 'none';
+    document.getElementById('authCredentialsTab').style.display = tab === 'credentials' ? 'block' : 'none';
+  }
+
+
+  /**
+   * Render the capital-recycling panel.
+   *
+   * The point of this panel is to make a silent failure visible. Before v2.3 a
+   * live bot would sell nothing and redeem nothing: realised P&L climbed, the
+   * CLOB collateral balance fell, and eventually every order was skipped with
+   * "$X needed, $0.00 available" — a line that reads like a funding problem
+   * rather than what it is, wins locked into unredeemable tokens.
+   */
+  function renderRecycling() {
+    const ex = botState.exit || {};
+    const rd = botState.redeem || {};
+    const col = botState.collateral || {};
+
+    // ---- recycled capital
+    const recEl = document.getElementById('exitRecycled');
+    if (recEl) {
+      recEl.innerText = '$' + (ex.recycledUsd || 0).toFixed(2);
+      recEl.style.color = !botState.exitEnabled ? '#94a3b8' : (ex.recycledUsd > 0 ? '#34d399' : '#f59e0b');
+    }
+    const recSub = document.getElementById('exitRecycledSub');
+    if (recSub) {
+      recSub.innerText = botState.exitEnabled
+        ? `${ex.filled || 0} sell${(ex.filled || 0) === 1 ? '' : 's'} filled · ${(ex.sharesSold || 0).toFixed(2)} shares`
+          + ` · $${(ex.feesUsd || 0).toFixed(2)} fees`
+          + ((ex.partial || 0) ? ` · ${ex.partial} partial` : '')
+          + ((ex.failed || 0) ? ` · ${ex.failed} failed` : '')
+        : 'DISABLED — wins are held to resolution';
+    }
+    const exBar = document.getElementById('exitStatusBar');
+    if (exBar) {
+      // Attempted vs filled: a wide gap means exits are firing and not filling,
+      // which usually means the bid side is too thin at the chosen moment.
+      const attempted = ex.attempted || 0;
+      const pct = attempted > 0 ? Math.min(100, ((ex.filled || 0) / attempted) * 100) : 0;
+      exBar.style.width = (attempted > 0 ? pct : 0) + '%';
+      exBar.style.background = attempted === 0 ? '#94a3b8' : pct >= 66 ? '#34d399' : pct >= 33 ? '#f59e0b' : '#f87171';
+      exBar.title = attempted
+        ? `${ex.filled || 0} of ${attempted} exit order(s) filled`
+        : 'no exit orders attempted yet';
+    }
+
+    // ---- redemption sweeper
+    const rsEl = document.getElementById('redeemStatus');
+    const rsSub = document.getElementById('redeemStatusSub');
+    if (rsEl) {
+      if (!botState.autoRedeem) {
+        rsEl.innerText = 'OFF';
+        rsEl.style.color = '#f59e0b';
+      } else if (botState.paperMode && !rd.ready) {
+        // Checked before `rd.ready` on purpose: paper mode simulates the sweep,
+        // so "NOT READY" would be alarming and wrong.
+        rsEl.innerText = 'PAPER';
+        rsEl.style.color = '#60a5fa';
+      } else if (rd.ready) {
+        rsEl.innerText = 'READY';
+        rsEl.style.color = '#34d399';
+      } else {
+        rsEl.innerText = 'NOT READY';
+        rsEl.style.color = '#f87171';
+      }
+      rsEl.title = rd.reason || '';
+    }
+    if (rsSub) {
+      const parts = [];
+      if (!botState.autoRedeem) parts.push('AUTO_REDEEM is off — claim wins manually');
+      else if (!rd.ready) parts.push(rd.reason || 'not configured');
+      else {
+        parts.push(`${rd.mode || ''} · every ${Math.round((rd.everyMs || 0) / 1000)}s`);
+        parts.push(`${rd.redeemedThisSession || 0} redeemed`);
+        if (rd.pending) parts.push(`${rd.pending} queued`);
+        if (rd.failedThisSession) parts.push(`${rd.failedThisSession} failed`);
+        const st = rd.stats || {};
+        if (st.recoveredUsd) parts.push(`~$${st.recoveredUsd.toFixed(2)} recovered`);
+      }
+      rsSub.innerText = parts.join(' · ');
+      // Red only for a state that is actually a problem. In paper mode the sweep
+      // is simulated and needs no credentials, so `ready === false` there is
+      // expected — flagging it red trained the operator to ignore the colour.
+      rsSub.style.color = (!botState.autoRedeem || (rd.ready === false && !botState.paperMode)) ? '#fca5a5' : '';
+    }
+
+    // ---- tradeable collateral
+    const cbEl = document.getElementById('collateralBalance');
+    if (cbEl) {
+      const v = botState.paperMode ? col.paper : col.live;
+      cbEl.innerText = Number.isFinite(v) ? '$' + v.toFixed(2) : '—';
+      cbEl.style.color = Number.isFinite(v) && v <= 0 ? '#f87171' : '#34d399';
+    }
+    const cbSub = document.getElementById('collateralSub');
+    if (cbSub) {
+      if (botState.paperMode) {
+        cbSub.innerText = 'paper balance · exits are credited at settlement';
+      } else {
+        cbSub.innerText = Number.isFinite(col.allowance)
+          ? `allowance $${col.allowance.toFixed(2)} · this is all the order path can spend`
+          : 'what the order path can actually spend';
+        // The diagnostic that matters: P&L up while collateral is exhausted.
+        if ((botState.realizedPnl || 0) > 0 && Number.isFinite(col.live) && col.live <= 0) {
+          cbSub.innerText = '⚠ P&L is positive but collateral is $0 — wins are locked in tokens';
+          cbSub.style.color = '#fca5a5';
+        } else {
+          cbSub.style.color = '';
+        }
+      }
+    }
+
+    // ---- settings card
+    const exToggle = document.getElementById('cfgExitEnabled');
+    if (exToggle && document.activeElement !== exToggle) exToggle.checked = !!botState.exitEnabled;
+    const rdToggle = document.getElementById('cfgAutoRedeem');
+    if (rdToggle && document.activeElement !== rdToggle) rdToggle.checked = !!botState.autoRedeem;
+
+    const countEl = document.getElementById('recyclingCount');
+    if (countEl) {
+      countEl.innerText = `${botState.exitEnabled ? 'exit on' : 'exit off'} · ${botState.autoRedeem ? 'redeem on' : 'redeem off'}`;
+      countEl.style.color = (botState.exitEnabled || botState.autoRedeem) ? '#34d399' : '#f87171';
+    }
+
+    const cfgEc = (ex.config || {});
+    const exCfgEl = document.getElementById('exitConfigSummary');
+    if (exCfgEl) {
+      exCfgEl.innerText = `Sells when the model is ≥ ${((cfgEc.minModelProb || 0) * 100).toFixed(0)}% and the bid is `
+        + `${((cfgEc.minSellPrice || 0) * 100).toFixed(0)}–${((cfgEc.maxSellPrice || 0) * 100).toFixed(1)}c, `
+        + `${cfgEc.maxSecondsToExpiry}s→${cfgEc.minSecondsToExpiry}s before close, `
+        + `capped at ${((cfgEc.maxBidDepthParticipation || 0) * 100).toFixed(0)}% of bid depth. Order type ${cfgEc.orderType || 'FAK'}.`;
+    }
+    const rdCfgEl = document.getElementById('redeemConfigSummary');
+    if (rdCfgEl) {
+      rdCfgEl.innerText = rd.ready
+        ? `Redeems to ${rd.outputToken} via the ${rd.mode} relayer path every ${Math.round((rd.everyMs || 0) / 1000)}s, `
+          + `${rd.verifyOnChain ? 'verifying resolution on-chain first' : 'trusting the API resolution flag'}.`
+        : `Redeems to ${rd.outputToken || 'pUSD'} every ${Math.round((rd.everyMs || 0) / 1000)}s — currently: ${rd.reason || 'not configured'}.`;
+    }
+
+    // ---- the combined warning, in the panel rather than only in the log
+    const warnEl = document.getElementById('recyclingWarning');
+    if (warnEl) {
+      let msg = '';
+      if (!botState.exitEnabled && !botState.autoRedeem) {
+        msg = 'Both mechanisms are OFF. In live mode nothing converts wins back into tradeable collateral: '
+          + 'the bot will drain its balance into unredeemable tokens and then stop placing orders while realised P&L keeps rising.';
+      } else if (!botState.exitEnabled) {
+        msg = 'The pre-expiry exit is OFF, so capital is recycled only when the sweeper runs '
+          + `(${Math.round((rd.everyMs || 0) / 1000)}s cadence). Wins sit idle as tokens between sweeps.`;
+      } else if (botState.autoRedeem && !rd.ready && !botState.paperMode) {
+        msg = `Auto-redeem is ON but unusable: ${rd.reason || 'not configured'}. Anything the exit cannot sell will stay locked.`;
+      }
+      if (msg) { warnEl.style.display = 'block'; warnEl.textContent = msg; }
+      else { warnEl.style.display = 'none'; warnEl.textContent = ''; }
+    }
+
+    // ---- positions still exposed to resolution
+    const posBox = document.getElementById('exitPositionsBox');
+    const posList = document.getElementById('exitPositionsList');
+    if (posBox && posList) {
+      const rows = (ex.positions || []).filter(p => (p.remainingShares || 0) > 0 || p.exiting);
+      if (!rows.length) {
+        posBox.style.display = 'none';
+      } else {
+        posBox.style.display = 'block';
+        posList.innerHTML = rows.map(p => {
+          const bits = [
+            `<span style="color:#94a3b8">${escapeHtml(p.slug || '')}</span>`,
+            `<span style="color:${p.side === 'UP' ? '#34d399' : '#f87171'}">${escapeHtml(p.side || '')}</span>`,
+            `${(p.filledShares || 0).toFixed(2)} filled`,
+            (p.exitShares ? `${p.exitShares.toFixed(2)} sold` : 'not sold'),
+            `<strong>${(p.remainingShares || 0).toFixed(2)} awaiting resolution</strong>`,
+            p.exiting ? '<span style="color:#f59e0b">sell in flight</span>' : '',
+          ].filter(Boolean);
+          return `<div style="padding:2px 0">${bits.join(' · ')}</div>`;
+        }).join('');
+      }
+    }
+
+    // ---- recent redemptions
+    const hBox = document.getElementById('redeemHistoryBox');
+    const hList = document.getElementById('redeemHistoryList');
+    if (hBox && hList) {
+      const hist = rd.history || [];
+      if (!hist.length) {
+        hBox.style.display = 'none';
+      } else {
+        hBox.style.display = 'block';
+        hList.innerHTML = hist.slice(0, 8).map(h => {
+          const when = h.at ? new Date(h.at).toLocaleTimeString() : '';
+          return `<div style="padding:2px 0;color:${h.ok ? '#86efac' : '#fca5a5'}">`
+            + `${escapeHtml(when)} ${h.ok ? '✓' : '✗'} ${escapeHtml(String(h.title || h.conditionId || '').slice(0, 34))}`
+            + (h.ok && h.transactionHash ? ` <span style="color:#94a3b8">tx ${escapeHtml(String(h.transactionHash).slice(0, 12))}…</span>` : '')
+            + (!h.ok && h.error ? ` <span style="color:#fca5a5">${escapeHtml(String(h.error).slice(0, 60))}</span>` : '')
+            + `</div>`;
+        }).join('');
+      }
+    }
+  }
+
+  /** Minimal escaping for anything interpolated into innerHTML. */
+  function escapeHtml(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, c => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+  }
+
+  function renderState() {
+    if (!botState) return;
+
+    // Toggle button and status badge
+    const badge = document.getElementById('statusBadge');
+    const text = document.getElementById('statusText');
+    const btn = document.getElementById('toggleBotBtn');
+
+    if (botState.isRunning) {
+      badge.className = 'status-badge status-running';
+      text.innerText = 'BOT ACTIVE & TRADING';
+      btn.className = 'btn btn-danger';
+      btn.innerText = '⏹ Stop Bot';
+    } else {
+      badge.className = 'status-badge status-stopped';
+      text.innerText = 'BOT STOPPED';
+      btn.className = 'btn btn-success';
+      btn.innerText = '▶ Start Bot';
+    }
+
+    // Trading Mode Badge
+    const modeBadge = document.getElementById('tradingModeBadge');
+    const modePaperBtn = document.getElementById('modePaperBtn');
+    const modeLiveBtn = document.getElementById('modeLiveBtn');
+    if (botState.paperMode) {
+      modeBadge.innerText = 'PAPER TEST MODE';
+      modeBadge.style.color = '#60a5fa';
+      modePaperBtn.className = 'btn btn-primary btn-sm';
+      modeLiveBtn.className = 'btn btn-secondary btn-sm';
+    } else {
+      modeBadge.innerText = 'LIVE ORDER EXECUTION';
+      modeBadge.style.color = '#f87171';
+      modePaperBtn.className = 'btn btn-secondary btn-sm';
+      modeLiveBtn.className = 'btn btn-danger btn-sm';
+    }
+
+    // Financial stats
+    document.getElementById('accountBalance').innerText = '$' + (botState.paperMode ? botState.paperBalance.toFixed(2) : (botState.auth?.liveBalanceUsd || 0).toFixed(2));
+    const balLabel = document.querySelector('#accountBalance')?.previousElementSibling;
+    if (balLabel && balLabel.classList.contains('stat-label')) {
+      balLabel.innerText = botState.paperMode ? 'Paper Account Balance' : 'Tradeable Collateral (CLOB)';
+    }
+    
+    const pnlEl = document.getElementById('realizedPnl');
+    pnlEl.innerText = (botState.realizedPnl >= 0 ? '+$' : '-$') + Math.abs(botState.realizedPnl).toFixed(2);
+    pnlEl.style.color = botState.realizedPnl >= 0 ? '#34d399' : '#f87171';
+
+    const pnlPct = ((botState.realizedPnl / 1000) * 100).toFixed(2);
+    document.getElementById('pnlPercent').innerText = `${pnlPct >= 0 ? '+' : ''}${pnlPct}% return`;
+
+    document.getElementById('winRate').innerText = `${botState.winRate}%`;
+    document.getElementById('tradeCountSub').innerText = `${botState.winningTrades} wins / ${botState.losingTrades} losses (${botState.totalTrades} total)`;
+    // Surface the stop reason, and say which limit tripped. Previously this
+    // existed only in `stoppedReason`/the log, so an operator who set a $300
+    // stop-loss had no way to see that a $50 daily cap was what fired.
+    const stoppedBanner = document.getElementById('stoppedBanner');
+    if (stoppedBanner) {
+      if (botState.stoppedReason && !botState.isRunning) {
+        stoppedBanner.style.display = 'block';
+        document.getElementById('stoppedText').innerText = botState.stoppedReason;
+        const sub = document.getElementById('stoppedHint');
+        if (/Daily loss limit/i.test(botState.stoppedReason)) {
+          sub.innerText = `This is the per-UTC-day cap (Max Daily Loss = -$${(botState.maxDailyLossUsd || 0).toFixed(2)}), not the cumulative stop-loss. The counter is ${(botState.dailyLoss || 0) >= (botState.maxDailyLossUsd || 0) ? 'persisted in bot_state.json, so restarting will stop again immediately' : 'under the limit'} and resets at 00:00 UTC. Raising the cap above takes effect on the next tick — no restart needed.`;
+        } else if (/Stop-loss/i.test(botState.stoppedReason)) {
+          sub.innerText = `This is the cumulative net-P&L breaker (limit -$${(botState.stopLossUsd || 0).toFixed(2)}); it does not reset daily. The separate daily cap is -$${(botState.maxDailyLossUsd || 0).toFixed(2)}.`;
+        } else {
+          sub.innerText = '';
+        }
+      } else {
+        stoppedBanner.style.display = 'none';
+      }
+    }
+
+    // Two independent breakers, shown separately. Labelling only the stop-loss
+    // as "Risk Circuit Breaker" is what made a $50 daily cap look like a
+    // $300 stop-loss that had been ignored.
+    document.getElementById('circuitBreaker').innerText = `-$${(botState.stopLossUsd || 0).toFixed(2)}`;
+    const cbSubEl = document.getElementById('circuitBreakerSub');
+    if (cbSubEl) {
+      cbSubEl.innerText = `Cumulative net P&L stop · now $${(botState.realizedPnl || 0).toFixed(2)}`;
+      cbSubEl.style.color = botState.realizedPnl <= -(botState.stopLossUsd || 0) ? '#f87171' : '';
+    }
+
+    const dlEl = document.getElementById('dailyLossBreaker');
+    if (dlEl) {
+      dlEl.innerText = `-$${(botState.dailyLoss || 0).toFixed(2)}`;
+      dlEl.style.color = (botState.dailyLoss || 0) >= (botState.maxDailyLossUsd || 0) ? '#f87171' : '#f59e0b';
+    }
+    const dlSubEl = document.getElementById('dailyLossBreakerSub');
+    if (dlSubEl) {
+      dlSubEl.innerText = `Gross losses today (UTC) · limit -$${(botState.maxDailyLossUsd || 0).toFixed(2)}`;
+    }
+    const dlRemEl = document.getElementById('dailyLossRemaining');
+    if (dlRemEl) {
+      const remaining = Math.max(0, (botState.maxDailyLossUsd || 0) - (botState.dailyLoss || 0));
+      dlRemEl.innerText = `$${remaining.toFixed(2)}`;
+      dlRemEl.style.color = remaining <= 0 ? '#f87171' : remaining < (botState.maxDailyLossUsd || 0) * 0.34 ? '#f59e0b' : '#34d399';
+      const remSubEl = document.getElementById('dailyLossRemainingSub');
+      if (remSubEl) {
+        const reset = botState.dailyLossResetAtUtc ? new Date(botState.dailyLossResetAtUtc) : null;
+        remSubEl.innerText = reset && !isNaN(reset)
+          ? `Resets ${reset.toLocaleString()} (local time)`
+          : 'Resets 00:00 UTC';
+      }
+      const barEl = document.getElementById('dailyLossBar');
+      if (barEl) {
+        const pct = Math.min(100, Math.max(0, botState.dailyLossPct || 0));
+        barEl.style.width = pct + '%';
+        barEl.style.background = pct >= 100 ? '#f87171' : pct >= 66 ? '#f59e0b' : '#34d399';
+      }
+    }
+
+    renderRecycling();
+
+    // Sync strategy toggles from persisted state and show live module activity.
+    // Reading straight off the server's canonical keys is what makes a toggle
+    // visibly stick: the row dims and stops accumulating evaluations.
+    if (botState.strategies) {
+      let enabledCount = 0, totalCount = 0;
+      for (const item of document.querySelectorAll('.strategy-item[data-strategy]')) {
+        const key = item.dataset.strategy;
+        const s = botState.strategies[key];
+        if (!s) continue;
+        totalCount++;
+        if (s.enabled) enabledCount++;
+
+        const cb = item.querySelector('input[data-strategy]');
+        // Don't fight the user's own click while it is in flight.
+        if (cb && document.activeElement !== cb) cb.checked = !!s.enabled;
+
+        item.classList.toggle('disabled', !s.enabled);
+
+        const statEl = document.getElementById('stat-' + key);
+        if (statEl) {
+          if (!s.enabled) {
+            statEl.innerHTML = '<span class="stat-off">off — module not evaluated</span>';
+          } else {
+            const fired = s.fired || 0;
+            statEl.innerHTML =
+              `<span class="stat-eval">evaluated ${s.evaluated || 0}</span>` +
+              ` · <span class="stat-fired${fired ? ' hot' : ''}">fired ${fired}</span>` +
+              (s.lastReason ? ` · <span class="stat-reason">${escapeHtml(s.lastReason)}</span>` : '');
+          }
+        }
+      }
+      const countEl = document.getElementById('strategyCount');
+      if (countEl && totalCount) {
+        countEl.textContent = `${enabledCount}/${totalCount} enabled`;
+        countEl.className = 'strategy-count'
+          + (enabledCount === 0 ? ' none' : enabledCount < totalCount ? ' partial' : '');
+      }
+    }
+    // Sync every risk/order control from server state. Previously only Kelly
+    // and the max-trade cap were refreshed, so the stake and stop-loss inputs
+    // kept displaying their hardcoded HTML defaults (2.00 / 25.00) regardless
+    // of what the bot was actually configured to use.
+    const syncField = (id, value, kind) => {
+      const el = document.getElementById(id);
+      if (!el || value === undefined || value === null) return;
+      if (document.activeElement === el) return;         // never fight typing
+      if (dirtyFields.has(id)) return;                   // changed, not yet committed
+      if (kind === 'checkbox') { el.checked = !!value; return; }
+      if (kind === 'number') { el.value = Number(value).toFixed(2); return; }
+      // <select>: assigning a value with no matching <option> silently blanks
+      // the control, so only apply it when that option actually exists.
+      if (Array.from(el.options).some(o => o.value === value)) el.value = value;
+    };
+    syncField('cfgTradeAmount', botState.tradeAmountUsd, 'number');
+    syncField('cfgStopLoss', botState.stopLossUsd, 'number');
+    syncField('cfgMaxDailyLoss', botState.maxDailyLossUsd, 'number');
+    syncField('cfgMaxTrade', botState.maxTradeAmountUsd, 'number');
+    syncField('cfgKellySizing', botState.kellySizing, 'checkbox');
+    syncField('timeframeSelect', botState.selectedTimeframe, 'select');
+    syncField('cfgMarketFilter', botState.marketFilterSlug, 'select');
+
+    // Reference feeds (settlement series first)
+    const f = botState.feeds;
+    if (f) {
+      const fmt = (v) => (v === null || v === undefined) ? '--' : '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      document.getElementById('spotBtcPrice').innerText = fmt(f.spot);
+      document.getElementById('coinbasePrice').innerText = fmt(f.coinbase && f.coinbase.price);
+      document.getElementById('krakenPrice').innerText = fmt(f.kraken && f.kraken.price);
+      document.getElementById('twapPrice').innerText = fmt(f.twap);
+
+      const srcBadge = document.getElementById('twapSourceBadge');
+      const pb = f.polybolt || {};
+      const pbWhy = pb.lastError
+        ? `PolyBolt: ${pb.lastError}`
+        : (pb.connected ? `PolyBolt connected=${pb.connected} authed=${pb.authed}` : 'PolyBolt not connected');
+      if (f.twapAuthoritative) {
+        srcBadge.innerText = 'CHAINLINK 60s TWAP';
+        srcBadge.title = 'Settlement series: live Chainlink 60s TWAP via PolyBolt. This is what the market actually settles on.';
+        srcBadge.style.background = 'rgba(16,185,129,0.2)'; srcBadge.style.color = '#34d399';
+      } else {
+        const proxy = f.twapSource === 'spot-proxy-twap60';
+        srcBadge.innerText = proxy ? 'SPOT PROXY (degraded)' : 'NO TWAP';
+        srcBadge.title = proxy
+          ? `The Chainlink TWAP feed is not live, so the bot is substituting its own 60-second average of Coinbase/Kraken spot. It is an approximation of the settlement series, so every module requires 1.5x its normal net edge and the bot trades far less. ${pbWhy}`
+          : `No settlement series available yet. ${pbWhy}`;
+        srcBadge.style.background = 'rgba(245,158,11,0.2)'; srcBadge.style.color = '#fbbf24';
+      }
+
+      const w = botState.priceToBeat;
+      document.getElementById('priceToBeat').innerText = w && w.twap ? '$' + Number(w.twap).toFixed(2) + (w.authoritative ? '' : ' (proxy)') : 'collecting…';
+
+      const mom = f.momentum1mUsd;
+      const momEl = document.getElementById('mom1m');
+      if (mom === null || mom === undefined) { momEl.innerText = '--'; }
+      else { momEl.innerText = (mom >= 0 ? '+$' : '-$') + Math.abs(mom).toFixed(2); momEl.style.color = mom >= 0 ? '#34d399' : '#f87171'; }
+
+      const rsiEl = document.getElementById('rsiValue');
+      if (f.rsi14 === null || f.rsi14 === undefined) { rsiEl.innerText = '--'; }
+      else { rsiEl.innerText = f.rsi14.toFixed(0); rsiEl.style.color = f.rsi14 > 65 ? '#f87171' : (f.rsi14 < 35 ? '#34d399' : '#f3f4f6'); }
+    }
+
+    // Banners: geoblock + setup state
+    const geoBanner = document.getElementById('geoblockBanner');
+    const geo = botState.geoblock;
+    if (geo && geo.blocked) {
+      geoBanner.style.display = 'block';
+      document.getElementById('geoblockText').innerText =
+        ` orders from ${geo.country || 'this region'}${geo.region ? '/' + geo.region : ''} are rejected by Polymarket. Live trading is disabled — ask a Polymarket API key holder in an eligible jurisdiction to run it.`;
+    } else { geoBanner.style.display = 'none'; }
+
+    const cfgBanner = document.getElementById('configBanner');
+    const a = botState.auth || {};
+    const problems = [];
+    if (!a.isAuthenticated) problems.push('no signer key configured');
+    if (a.walletSetup && a.walletSetup.ok === false) problems.push(a.walletSetup.error);
+    if (a.isAuthenticated && !a.hasCredentials) problems.push('CLOB credentials not derived yet');
+    // The old text here said "approve the exchange in the Polymarket UI", which
+    // is a no-op for a Deposit Wallet / Safe / proxy account: the allowance has
+    // to be granted by the wallet that holds the collateral. Name the tool that
+    // actually does it instead of sending the user down a dead end.
+    const ap = botState.approvals;
+    if (botState.allowanceWarning || (ap && ap.verifiedOnChain && (ap.missing || []).length)) {
+      problems.push('the account wallet has not approved the exchanges — run `npm run approve` '
+        + '(or POST /api/approve); an approve() from the signer EOA does not work');
+    } else if (ap && !ap.verifiedOnChain && ap.error) {
+      problems.push(`exchange approvals could not be verified on-chain (${ap.error})`);
+    }
+    if (botState.orderVersionOk === false) {
+      problems.push(`the CLOB is accepting order version ${botState.orderVersion} — this bot signs `
+        + 'CTF V2 orders, so live orders will be rejected');
+    }
+    if (problems.length && botState.isRunning && !botState.paperMode) {
+      cfgBanner.style.display = 'block';
+      document.getElementById('configText').innerText = ' ' + problems.join(' · ');
+    } else { cfgBanner.style.display = 'none'; }
+
+    // Open Positions
+    document.getElementById('openPosCount').innerText = botState.activePositions.length;
+    const posBody = document.getElementById('openPositionsBody');
+    if (botState.activePositions.length === 0) {
+      posBody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 20px;">No open positions. Strategies evaluate every 750ms and only fire when an edge survives fees, spread and depth checks.</td></tr>`;
+    } else {
+      posBody.innerHTML = botState.activePositions.map(p => {
+        const shares = p.filledShares || 0;
+        const avg = p.avgPrice !== null && p.avgPrice !== undefined ? p.avgPrice : p.limitPrice;
+        const cost = (p.filledUsd || 0) + (p.feeUsd || 0);
+        const secsLeft = Math.max(0, (p.expiresAtEpoch || 0) - Math.floor(Date.now() / 1000));
+        const statusColor = p.status === 'FILLED' ? '#34d399' : (p.status === 'REJECTED' ? '#f87171' : '#fbbf24');
+        return `
+        <tr>
+          <td><strong>${p.marketSlug}</strong><br><span style="font-size: 10px; color: var(--text-muted);">${p.question || ''}</span></td>
+          <td><span class="badge-pill" style="background: ${p.side === 'UP' ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)'}; color: ${p.side === 'UP' ? '#34d399' : '#f87171'};">${p.side}</span></td>
+          <td>${shares.toFixed(2)}</td>
+          <td>$${Number(avg).toFixed(3)}</td>
+          <td>$${cost.toFixed(2)}<br><span style="font-size: 10px; color: var(--text-muted);">fee $${(p.feeUsd || 0).toFixed(3)}</span></td>
+          <td><span style="color:${statusColor}; font-weight:600; font-size:11px;">${p.status}</span><br><span style="font-size:10px; color: var(--text-muted);">${secsLeft}s left</span></td>
+          <td><span style="font-size: 11px;">${p.strategyName || p.strategy}</span><br><span style="font-size:10px; color: var(--text-muted);">P=${((p.modelProb || 0) * 100).toFixed(1)}% · edge ${((p.expectedEdge || 0) * 100).toFixed(1)}c</span></td>
+          <td>${(p.orderIds || []).length && !p.isPaper ? `<button class="btn btn-sm" style="background:#374151;color:#e5e7eb;" onclick="cancelPosition('${p.id}')">Cancel</button>` : ''}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Trade History
+    const histBody = document.getElementById('tradeHistoryBody');
+    if (botState.tradeHistory.length === 0) {
+      histBody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 20px;">No closed trades yet.</td></tr>`;
+    } else {
+      histBody.innerHTML = botState.tradeHistory.map(h => {
+        const cost = (h.filledUsd || 0) + (h.feeUsd || 0);
+        const settled = h.status === 'SETTLED';
+        const badge = settled
+          ? `<span style="font-size:10px;color:var(--text-muted)">${h.resolutionSource || ''}</span>`
+          : `<span style="font-size:10px;color:#fbbf24">${h.status}</span>`;
+        return `
+        <tr>
+          <td><strong>${h.marketSlug}</strong><br>${badge}</td>
+          <td><span class="badge-pill" style="background: ${h.side === 'UP' ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)'}; color: ${h.side === 'UP' ? '#34d399' : '#f87171'};">${h.side}</span></td>
+          <td style="font-size: 11px;">${h.strategyName || h.strategy}</td>
+          <td>$${Number(h.avgPrice || 0).toFixed(3)}</td>
+          <td>$${cost.toFixed(2)}</td>
+          <td>$${(h.payout || 0).toFixed(2)}</td>
+          <td><strong style="color: ${(h.pnl || 0) >= 0 ? '#34d399' : '#f87171'}">${(h.pnl || 0) >= 0 ? '+' : ''}$${(h.pnl || 0).toFixed(2)}</strong></td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Logs
+    const logBox = document.getElementById('logBox');
+    if (botState.logs) {
+      logBox.innerHTML = botState.logs.map(l => `
+        <div class="log-line">
+          <span class="log-time">[${l.timeStr}]</span>
+          <span class="log-${l.level}">${l.message}</span>
+        </div>
+      `).join('');
+    }
+
+    // Auth status
+    const au = botState.auth;
+    if (au) {
+      document.getElementById('authEmail').innerText = `${au.signatureTypeName} · ${au.credentialsSource === 'none' ? 'no API creds yet' : 'creds: ' + au.credentialsSource}`;
+      const sigEl = document.getElementById('authSigType');
+      if (sigEl) sigEl.innerText = au.signatureTypeName + ' (type ' + au.signatureType + ')';
+      document.getElementById('authFunder').innerText = `account ${au.accountWallet || 'not set'} · signer ${au.signerAddress || 'not set'}`;
+      document.getElementById('liveUsdcBal').innerText = au.liveBalanceUsd !== null && au.liveBalanceUsd !== undefined
+        ? `$${Number(au.liveBalanceUsd).toFixed(2)} collateral (allowance $${Number(au.allowanceUsd || 0).toFixed(2)})`
+        : 'balance not queried';
+    }
+  }
+
+  function renderMarkets() {
+    const list = document.getElementById('marketsList');
+    const filterSelect = document.getElementById('cfgMarketFilter');
+
+    // Update filter dropdown options
+    const prevVal = filterSelect.value;
+    let filterOptions = '<option value="auto">Auto-Select Next Expiring Market</option>';
+    currentMarkets.forEach(m => {
+      filterOptions += `<option value="${m.slug}">${m.title} (${m.timeframe})</option>`;
+    });
+    filterSelect.innerHTML = filterOptions;
+    filterSelect.value = prevVal;
+
+    if (currentMarkets.length === 0) {
+      list.innerHTML = `<div style="padding: 20px; text-align: center; color: var(--text-muted);">No active Bitcoin Up/Down markets found right now.</div>`;
+      return;
+    }
+
+    list.innerHTML = currentMarkets.map(m => {
+      const min = Math.floor(m.remainingSec / 60);
+      const sec = Math.floor(m.remainingSec % 60);
+      const timeLeftStr = m.remainingSec > 0 ? `${min}m ${String(sec).padStart(2, '0')}s` : 'Closed';
+      const isUrgent = m.remainingSec <= 60 && m.remainingSec > 0;
+      const feeRate = m.feeSchedule ? (m.feeSchedule.rate * 100).toFixed(0) + '%' : '?';
+      const warn = m.tokenMappingOk ? '' : ' <span style="color:#f87171;font-size:10px;">OUTCOME MAP INVALID — not tradeable</span>';
+
+      return `
+        <div class="market-row">
+          <div>
+            <div style="font-weight: 600;">${m.title}</div>
+            <div style="font-size: 11px; color: var(--text-muted); font-family: monospace;">${m.slug}</div>
+            <div style="font-size: 10px; color: var(--text-muted);">tick ${m.tickSize} · min ${m.minOrderSize} shares · taker fee ${feeRate}${m.negRisk ? ' · NEG-RISK' : ''}${warn}</div>
+          </div>
+          <div>
+            <span class="badge-pill" style="background: ${isUrgent ? 'rgba(239, 68, 68, 0.2)' : 'rgba(59, 130, 246, 0.15)'}; color: ${isUrgent ? '#ef4444' : '#60a5fa'}; font-weight: 700;">
+              ⏱ ${timeLeftStr}
+            </span>
+          </div>
+          <div>
+            <span style="color: #34d399; font-weight: 700; font-size: 14px;">${m.priceUp !== null ? '$' + m.priceUp.toFixed(3) : '--'}</span>
+            <span style="font-size: 11px; color: var(--text-muted);">${m.priceUp !== null ? '(' + (m.priceUp * 100).toFixed(0) + '%)' : ''}</span>
+          </div>
+          <div>
+            <span style="color: #f87171; font-weight: 700; font-size: 14px;">${m.priceDown !== null ? '$' + m.priceDown.toFixed(3) : '--'}</span>
+            <span style="font-size: 11px; color: var(--text-muted);">${m.priceDown !== null ? '(' + (m.priceDown * 100).toFixed(0) + '%)' : ''}</span>
+          </div>
+          <div style="display: flex; gap: 4px;">
+            <button class="btn btn-sm" style="background: #10b981; color: white;" onclick="manualTrade('${m.slug}', 'UP')">Buy Up</button>
+            <button class="btn btn-sm" style="background: #ef4444; color: white;" onclick="manualTrade('${m.slug}', 'DOWN')">Buy Down</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  async function runDiagnostics() {
+    try {
+      const res = await fetch('/api/diagnostics');
+      const d = await res.json();
+      const lines = d.checks.map(c => `${c.ok ? '✓' : '✗'} ${c.name}: ${c.detail}`);
+      alert('Diagnostics (' + d.at + ')\n\n' + lines.join('\n'));
+    } catch (e) { alert('Diagnostics failed: ' + e.message); }
+  }
+
+  async function cancelPosition(id) {
+    if (!confirm('Cancel the resting order for this position?')) return;
+    const res = await fetch(`/api/positions/${id}/cancel`, { method: 'POST' });
+    const j = await res.json();
+    if (!j.ok) alert('Cancel failed: ' + JSON.stringify(j.results || j.error));
+    fetchStatus();
+  }
+
+  // Polling loops
+  setInterval(fetchStatus, 1500);
+  setInterval(fetchMarkets, 3000);
+  fetchStatus();
+  fetchMarkets();
+</script>
+
+</body>
+</html>
