@@ -1,4 +1,4 @@
-# The 8 strategies, corrected
+# The 9 strategies, corrected
 
 Every module in the original bot was built on a false premise: that these markets
 settle on the spot price of Bitcoin. They do not. Each market's own metadata says so:
@@ -175,6 +175,128 @@ The module trades only when the market is offering that side at or below
 `SQS_MAX_PRICE` *and* the model is at least `SQS_MIN_PROB` — a ≥3.5¢ disagreement
 between model and quote in the last 25 seconds. It is opportunistic by
 construction; the other seven modules are the workhorses.
+
+---
+
+## 9. Passive Reversion *(the only module that does not take)*
+
+Modules 1–8 are eight different triggers for **one trade**: buy a side at the
+ask. That means they all pay the same cost, and on a crypto market that cost is
+large:
+
+```
+fee = 0.07 · p · (1 − p)          →  1.75¢/share at 50¢,  0.46¢ at 93¢
+```
+
+Every module's edge gate is 1–3¢. **The fee is the trade.** Fair-Value EV needs
+a 3¢ net edge, so it needs a ~4.75¢ gross disagreement with the market before
+it can act at all — and a large part of that 4.75¢ is simply the fee it is
+about to pay.
+
+Polymarket's crypto fee schedule is `takerOnly: true`. From the exchange's own
+documentation: *"Makers are never charged fees. Only takers pay fees."* — and
+20% of the taker fees collected in a market are redistributed daily to the
+makers who were quoting in it. Module 9 is built on that asymmetry.
+
+### What it does
+
+It does not chase the book. It **rests a post-only bid inside the spread** and
+is paid to wait:
+
+```
+dislocation = p_model − bestBid                      ≥  MR_MIN_DISLOCATION (2¢)
+quote       = min(bestBid + MR_IMPROVE_TICKS·tick,   # 1 tick above the bid
+                  p_model − MR_MIN_EDGE,             # never pay more than fair − buffer
+                  MR_MAX_QUOTE_PRICE,                # 85¢
+                  bestAsk − tick)                    # never cross the spread
+netEdge     = p_model − quote                        # no fee term
+```
+
+Submitted as **GTD + `postOnly`** for `MR_REST_SECONDS` (20s).
+
+### Why there is something to harvest
+
+Since the TWAP upgrade these books have a specific, exploitable property: **the
+order book reacts to spot far harder than the number that settles the market
+does.** A single side's best ask can run `0.60 → 0.80 → 0.48` in a few seconds
+while the 60-second Chainlink TWAP barely moves, because a TWAP is an average
+and a book is an opinion. So the book's implied probability is not a slow
+drifting estimate — it is a noisy, mean-reverting series oscillating around the
+model's fair value.
+
+A taker module has to catch the swing at the right instant and pay the spread
+plus the fee to do it. A maker module just posts at fair − buffer and lets the
+swing come to it.
+
+It is also **the only edge in this bot that is not a latency race**. Modules 1–8
+compete with co-located market makers; from a home connection you lose that
+race on the marginal trade. A resting bid fills because it is the best price on
+the book, not because it arrived first.
+
+### The cost of the route, honestly
+
+| | Taker (modules 1–8) | Maker (module 9) |
+|---|---|---|
+| Fee at 50¢ | 1.75¢/share | **0** |
+| Price paid | ask (+ `MAX_SLIPPAGE_CENTS`) | our quote, ~1 tick over the bid |
+| Fills | always | only if the market trades into us |
+| When it fills | we crossed → we wanted it | **someone chose us** |
+| Needs co-location | for the latency-sensitive modules | no |
+
+The last row of the "when it fills" column is the whole risk of the strategy,
+and it has a name: **adverse selection**. When you are filled passively it is
+because somebody wanted to sell at your price, and they may know something you
+do not. Three guards answer it:
+
+1. **`MR_MIN_EDGE` is the premium.** With no fee to pay, the entire 1.5¢
+   threshold is adverse-selection insurance rather than a cost of doing
+   business. Lowering it raises fill rate and lowers expected value per fill.
+2. **The quote is re-priced every tick and pulled when it stops working.**
+   `BotCore.managePassiveEntries()` recomputes the TWAP model for the open
+   quote on every loop and cancels it the moment
+   `p_model < quote + MR_MIN_EDGE`. A quote that no longer has an edge is not
+   liquidity provision, it is a standing offer to be picked off.
+3. **`MR_MAX_QUOTE_PRICE` (85¢) and `MR_MAX_TICKS_BELOW_BID` (2).** No quoting
+   near-certain outcomes, where you collect a cent and eat a 90¢ loss when the
+   "certainty" breaks; and no resting a bid so far below the market that it can
+   never fill, which would occupy a position slot for nothing.
+
+### Guards
+
+| Guard | Setting |
+|---|---|
+| Feed | **refuses to quote on the spot proxy.** Every other module degrades to 1.5× its edge threshold; a quote priced off the wrong series for 20 seconds is not a degraded trade, it is a bad trade |
+| Dislocation | `MR_MIN_DISLOCATION` (2¢) below fair |
+| Crossing | quote is always ≥1 tick under the best ask, **and** submitted `postOnly` so the CLOB rejects it rather than filling it as a taker |
+| Model agreement | `MR_MIN_PROB` (0.55) |
+| Price ceiling | `MR_MAX_QUOTE_PRICE` (0.85) |
+| Bid depth | `MR_MIN_BID_DEPTH` ($150) — never be the whole book |
+| Spread | `MAX_SPREAD_CENTS`, per side |
+| Life | `MR_REST_SECONDS` (20s), cancelled `MR_CANCEL_BUFFER` (8s) + `MIN_SECONDS_TO_EXPIRY` before close |
+| Paper mode | **a paper quote does not fill instantly.** It rests, and fills only when the best ask reaches the quote — modelling it with `estimateBuyFill()` would report every quote as a win |
+
+### What it costs you
+
+A resting quote is an open position. With the shipped `MAX_OPEN_POSITIONS=1`,
+nothing else trades in that window while it rests — up to 20 seconds of a
+300-second window, and only in windows where no other module had a better edge
+(the maker signal competes on the same `edge` field, and usually wins it
+because it is not paying a fee). `configWarnings()` says so at startup if you
+are running with one position slot. Raise `MAX_OPEN_POSITIONS` or lower
+`MR_REST_SECONDS` if that trade-off is not the one you want.
+
+### Tuning
+
+* **`MR_MIN_EDGE`** — the adverse-selection premium. 1.5¢ is conservative;
+  1.0¢ fills more often at lower EV per fill. Do not go below 1¢.
+* **`MR_REST_SECONDS`** — longer waits fill more quotes and hold the slot
+  longer. 20s suits a 5-minute window.
+* **`MR_IMPROVE_TICKS`** — 1 puts you top of book (best fill rate). 0 joins the
+  queue and fills only after the bids ahead of you are consumed, but at a
+  slightly better price.
+* **`MR_MIN_DISLOCATION`** — raise it to trade only the violent swings; the
+  module will fire less and earn more per fill.
+
 ---
 
 ## Sizing
@@ -191,12 +313,24 @@ construction; the other seven modules are the workhorses.
 
 These modules trade a ~5-minute event contract against a 7%-of-notional taker fee
 that peaks in the middle of the price range. The realistic edges are the ones with
-structural reasons: model-vs-quote divergence late in the window, and convergence
-trades where the fee is small. Latency-sensitive plays (momentum, cross-venue
+structural reasons: model-vs-quote divergence late in the window, convergence
+trades where the fee is small, and — for module 9 — the difference between paying
+that fee and not paying it. Latency-sensitive plays (momentum, cross-venue
 divergence) require your host to be close to Polymarket's `eu-west-2` infrastructure;
-from a home connection you are competing with market makers who are co-located. Paper
-trade for a few hundred windows before risking capital, and expect the live numbers to
-be worse than the paper ones — that gap is your latency and slippage.
+from a home connection you are competing with market makers who are co-located.
+
+**That is the argument for module 9.** Eight modules race for the same
+milliseconds that a co-located market maker owns. A resting bid does not race —
+it is filled because it is the best price on the book. If you are running this
+from a home connection, Passive Reversion is the one module whose edge does not
+shrink with your ping, because the fee it avoids (up to 1.75¢/share) is charged
+to the co-located maker's takers as well as to yours.
+
+Paper trade for a few hundred windows before risking capital, and expect the live
+numbers to be worse than the paper ones — that gap is your latency and slippage.
+For module 9 in particular, paper mode deliberately *understates* the result: an
+unfilled paper quote earns nothing and a filled one fills at your price, so the
+fill-rate you see is the honest one rather than the optimistic one.
 
 ### What the endgame book actually looks like
 
@@ -205,6 +339,6 @@ windows: on the side the model rated ≥96.5%, the book was **bid 99.0–99.9¢ 
 offers at all in 79 samples**, and offered only at 1.00 in the other 25. Across
 those same samples the model and the market's implied probability agreed to within
 **±1¢** (mean +0.3¢) — the ≥3.5¢ disagreement SQS needs is a rare event, not an
-everyday one. Note also that all eight modules share one trade slot per window
+everyday one. Note also that all nine modules share one trade slot per window
 (`MAX_TRADES_PER_WINDOW`), and the mid-window modules usually take it minutes
 before SQS is even evaluated.

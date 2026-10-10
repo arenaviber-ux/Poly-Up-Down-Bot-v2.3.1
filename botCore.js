@@ -23,7 +23,7 @@ const { UserStream } = require('./wsUser');
 const { ReferencePrice } = require('./referencePrice');
 const { StrategyEngine } = require('./strategyEngine');
 const { signOrder, sizeOrder, computeBuyAmounts, computeMarketBuyAmounts, MARKET_ORDER_TYPES, roundPriceToTick, tickRules } = require('./orderSigner');
-const { fairProbUp, feeTotal, feePerShare, kellyStake, entryEdgeTest } = require('./pricing');
+const { fairProbUp, feeTotal, feePerShare, kellyStake, entryEdgeTest, makerEdgeTest } = require('./pricing');
 const { Redeemer } = require('./redeemer');
 const exitLogic = require('./exitManager');
 
@@ -295,6 +295,20 @@ class BotCore extends EventEmitter {
     if (!this.isRunning) return;
     this.isRunning = false;
     this.stoppedReason = reason;
+    // Pull any resting maker bid before the sockets go down. A quote is a live
+    // order with money attached; leaving it to its GTD expiry works, but that
+    // is up to MR_REST_SECONDS of exposure in a market nobody is watching any
+    // more. Fire-and-forget: stop() is synchronous, and the GTD expiry is the
+    // backstop if the process exits first.
+    const resting = this.activePositions.filter(p => this.isRestingQuote(p));
+    if (resting.length) {
+      this.logLine('WARN', `Stopping with ${resting.length} resting quote(s) — cancelling before disconnect`);
+      for (const p of resting) {
+        this.cancelPassiveEntry(p, `bot stopped: ${reason}`).catch((e) => {
+          this.logLine('ERROR', `Could not cancel resting quote on ${p.marketSlug}: ${e.message}`);
+        });
+      }
+    }
     clearInterval(this.loopTimer); this.loopTimer = null;
     clearInterval(this.discoveryTimer); this.discoveryTimer = null;
     this.stopRedeemTimer();
@@ -559,6 +573,11 @@ class BotCore extends EventEmitter {
       // the discovery refresh that happens further down.
       await this.manageExits();
 
+      // Resting quotes are managed before anything that can `return` out of the
+      // tick, for the same reason exits are: a live order left on the book
+      // because the loop took an early exit is unhedged exposure.
+      await this.managePassiveEntries();
+
       if (!this.checkRiskLimits()) return;
 
       // Discovery refreshes every DISCOVERY_MS (10s by default), so a market's
@@ -791,8 +810,16 @@ class BotCore extends EventEmitter {
     // the reason on the bot state: a signal that fires in the engine but is
     // dropped here must not look like a fill on the dashboard.
     const tag = decision.strategyName || decision.strategy || 'signal';
-    if (!book || book.bestAsk === null || book.bestAsk === undefined) {
-      this.lastSkipReason = `${tag} fired but did not trade: no ask liquidity on ${side}`;
+    // A maker module buys by RESTING a bid, so what it needs on the book is a
+    // bid to quote behind, not an ask to take. Requiring `bestAsk` here would
+    // reject exactly the markets where passive quoting is the only route in.
+    const maker = !!(decision.maker && Number.isFinite(decision.quotePrice));
+    const missingQuote = maker
+      ? (book.bestBid === null || book.bestBid === undefined)
+      : (book.bestAsk === null || book.bestAsk === undefined);
+    if (!book || missingQuote) {
+      this.lastSkipReason = `${tag} fired but did not trade: `
+        + (maker ? `no bid to quote behind on ${side}` : `no ask liquidity on ${side}`);
       this.logLine('WARN', this.lastSkipReason);
       return null;
     }
@@ -811,11 +838,17 @@ class BotCore extends EventEmitter {
       return null;
     }
 
-    // ---- pricing: marketable limit at ask + slippage allowance
-    const limitPrice = roundPriceToTick(
-      Math.min(this.cfg.order.maxBuyPrice, book.bestAsk + this.cfg.order.maxSlippageCents / 100),
-      constraints.tickSize,
-    );
+    // ---- pricing
+    // Taker: a marketable limit at ask + slippage allowance.
+    // Maker: the quote the module chose. It is already on-tick (rounded DOWN,
+    // because a bid rounded up can land on the ask) and already tested to sit
+    // below the best ask, so it rests instead of taking.
+    const limitPrice = maker
+      ? roundPriceToTick(Math.min(this.cfg.order.maxBuyPrice, decision.quotePrice), constraints.tickSize, 'down')
+      : roundPriceToTick(
+        Math.min(this.cfg.order.maxBuyPrice, book.bestAsk + this.cfg.order.maxSlippageCents / 100),
+        constraints.tickSize,
+      );
 
     // ---- sizing with the minimum share rule and the available balance
     let available = Infinity;
@@ -909,19 +942,36 @@ class BotCore extends EventEmitter {
     const moduleCfg = (this.strategies && decision && decision.strategy)
       ? this.strategies.configFor(decision.strategy)
       : null;
-    const t = entryEdgeTest({
-      prob: decision.prob,
-      bestAsk: book.bestAsk,
-      tickSize: constraints.tickSize,
-      maxSlippageCents: this.cfg.order.maxSlippageCents,
-      maxBuyPrice: this.cfg.order.maxBuyPrice,
-      feeSchedule,
-      moduleMinNetEdge: Number.isFinite(moduleCfg && moduleCfg.minNetEdge)
-        ? moduleCfg.minNetEdge
-        : this.cfg.fees.minNetEdge,
-      globalMinNetEdge: this.cfg.fees.minNetEdge,
-      degraded: !!(decision && decision.degraded),
-    });
+    const moduleMinNetEdge = Number.isFinite(moduleCfg && moduleCfg.minNetEdge)
+      ? moduleCfg.minNetEdge
+      : this.cfg.fees.minNetEdge;
+    const degraded = !!(decision && decision.degraded);
+    // Two gates, matched to the two ways of getting filled. A maker fill is not
+    // charged the taker fee, so charging it one here would reject exactly the
+    // trades this route exists to enable; `netEdgeIfCrossed` is carried on the
+    // result so the worst case is still visible.
+    const t = maker
+      ? makerEdgeTest({
+        prob: decision.prob,
+        quotePrice: limitPrice,
+        tickSize: constraints.tickSize,
+        maxBuyPrice: this.cfg.order.maxBuyPrice,
+        feeSchedule,
+        moduleMinNetEdge,
+        globalMinNetEdge: this.cfg.fees.minNetEdge,
+        degraded,
+      })
+      : entryEdgeTest({
+        prob: decision.prob,
+        bestAsk: book.bestAsk,
+        tickSize: constraints.tickSize,
+        maxSlippageCents: this.cfg.order.maxSlippageCents,
+        maxBuyPrice: this.cfg.order.maxBuyPrice,
+        feeSchedule,
+        moduleMinNetEdge,
+        globalMinNetEdge: this.cfg.fees.minNetEdge,
+        degraded,
+      });
     if (Math.abs(t.executablePrice - limitPrice) > 1e-9) {
       // Should be unreachable: both sides derive the limit price the same way.
       // If the book or the tick rules ever diverge this says so loudly instead of
@@ -933,15 +983,29 @@ class BotCore extends EventEmitter {
       const who = t.limitedBy === 'global'
         ? `MIN_NET_EDGE floor ${(t.effectiveMinNetEdge * 100).toFixed(2)}c`
         : `${tag} module gate ${(t.effectiveMinNetEdge * 100).toFixed(2)}c`;
+      const priceClause = maker
+        ? `(${side} quote ${(limitPrice * 100).toFixed(1)}c, fee-free as a maker; `
+          + `${(t.netEdgeIfCrossed * 100).toFixed(2)}c if it crossed and took)`
+        : `(${side} ask ${(book.bestAsk * 100).toFixed(1)}c + ${this.cfg.order.maxSlippageCents}c slippage = limit ${(limitPrice * 100).toFixed(1)}c)`;
       this.lastSkipReason =
         `${tag} fired but did not trade: net edge ${(t.netEdge * 100).toFixed(2)}c at the executable price `
-        + `(${side} ask ${(book.bestAsk * 100).toFixed(1)}c + ${this.cfg.order.maxSlippageCents}c slippage = limit ${(limitPrice * 100).toFixed(1)}c) `
-        + `is below the ${who}`;
+        + `${priceClause} is below the ${who}`;
       this.logLine('INFO', `Order skipped: ${this.lastSkipReason}`);
       return null;
     }
 
-    const orderType = this.cfg.order.orderType;
+    // A maker entry is always GTD + post-only. ORDER_TYPE (FAK by default)
+    // describes how the bot TAKES, and a resting bid is not taking: leaving it
+    // at FAK would cancel the order the instant it was placed.
+    const orderType = maker ? 'GTD' : this.cfg.order.orderType;
+    // The quote's lifetime: what the module asked for, capped so it is always
+    // off the book before MIN_SECONDS_TO_EXPIRY with room to cancel.
+    const restSeconds = maker
+      ? Math.max(1, Math.min(
+        Number.isFinite(decision.restSeconds) ? decision.restSeconds : this.cfg.risk.orderTimeoutSeconds,
+        Math.max(1, market.remainingSec - this.cfg.risk.minSecondsToExpiry - 2),
+      ))
+      : 0;
     // FAK/FOK are validated by the exchange as MARKET orders, which use mirrored
     // precision: the maker amount (USD) is capped at `size` decimals and the
     // taker amount (shares) at `amount` decimals. Building limit-shaped amounts
@@ -968,12 +1032,32 @@ class BotCore extends EventEmitter {
       // dashboard used to show the ask-price edge, and the two differ by the
       // slippage allowance — keeping both makes an entry auditable after the fact.
       expectedEdge: t.netEdge,
-      edgeAtAsk: t.netEdgeAtAsk,
+      // `edgeAtAsk` is a taker concept (ask vs ask + slippage). A maker quote
+      // has one price, so the field is null rather than a misleading duplicate
+      // of `expectedEdge`.
+      edgeAtAsk: maker ? null : t.netEdgeAtAsk,
+      // A maker position carries the worst case too: if the book moved and the
+      // quote took after all, this is the edge that applied. It is the number
+      // that answers "was being patient actually worth it?".
+      edgeIfCrossed: maker ? t.netEdgeIfCrossed : null,
       executionPrice: t.executablePrice,
       edgeLimitedBy: t.limitedBy,
       limitPrice: amounts.price,
       requestedShares: amounts.size,
       requestedUsd: amounts.usd,
+      // ---- passive (maker) bookkeeping -------------------------------------
+      // A resting quote is a live order for its whole life, so it needs its own
+      // deadline and its own adverse-selection tripwire. `managePassiveEntries()`
+      // re-prices it every tick and cancels it the moment either is breached.
+      maker,
+      executionStyle: maker ? 'maker' : 'taker',
+      quotePrice: maker ? amounts.price : null,
+      postOnly: maker ? decision.postOnly !== false : false,
+      restSeconds: maker ? restSeconds : null,
+      quotePlacedAtMs: maker ? Date.now() : null,
+      quoteDeadlineMs: maker ? Date.now() + restSeconds * 1000 : null,
+      makerMinNetEdge: maker ? t.effectiveMinNetEdge : null,
+      quoteBestBid: maker ? book.bestBid : null,
       tickSize: constraints.tickSize,
       minOrderSize: constraints.minOrderSize,
       negRisk: constraints.negRisk,
@@ -998,6 +1082,27 @@ class BotCore extends EventEmitter {
       isPaper: this.paperMode,
       reason: decision.reason,
     };
+
+    /**
+     * Paper mode must not pretend a resting bid filled instantly.
+     *
+     * `estimateBuyFill()` walks the ASK ladder — it models taking. A maker
+     * order fills only if the market trades down into it, so the paper quote is
+     * registered and left to be filled by `managePassiveEntries()` on a later
+     * tick, using the same rule a real book would apply: the best ask has to
+     * reach our bid. Modelling it as an instant fill would show this module
+     * earning every trade it ever quoted, which is exactly the kind of paper
+     * result that disappears live.
+     */
+    if (this.paperMode && maker) {
+      position.status = 'PENDING';
+      position.isPaper = true;
+      this.activePositions.push(position);
+      this.logLine('SUCCESS', `[PAPER] resting ${side} bid ${amounts.size} shares @ ${(amounts.price * 100).toFixed(1)}c `
+        + `(behind a ${(book.bestBid * 100).toFixed(1)}c bid, ask ${(book.bestAsk * 100).toFixed(1)}c) for up to `
+        + `${restSeconds}s via ${decision.strategyName}. ${decision.reason}`);
+      return position;
+    }
 
     if (this.paperMode) {
       const fill = estimateBuyFill(book, amounts.size);
@@ -1031,8 +1136,11 @@ class BotCore extends EventEmitter {
 
     let signed;
     try {
+      // A maker quote expires when its rest window ends, not at the generic GTD
+      // horizon. The GTD expiry is the backstop that takes the quote off the book
+      // even if this process dies mid-rest.
       const expiration = orderType === 'GTD'
-        ? Math.floor(Date.now() / 1000) + this.cfg.order.gtdSecondsLateWindow
+        ? Math.floor(Date.now() / 1000) + (maker ? restSeconds : this.cfg.order.gtdSecondsLateWindow)
         : 0;
       signed = await signOrder(this.auth.wallet, {
         tokenId,
@@ -1061,7 +1169,10 @@ class BotCore extends EventEmitter {
 
     let res;
     try {
-      res = await this.clob.postOrder(signed.order, { orderType });
+      // postOnly is the guarantee behind the fee-free edge: if the book moved
+      // and the quote would cross, the CLOB rejects it instead of filling it as
+      // a taker at a price the edge gate never charged a fee for.
+      res = await this.clob.postOrder(signed.order, { orderType, postOnly: maker && decision.postOnly !== false });
     } catch (e) {
       this.logLine('ERROR', `Order submission failed: ${e.message}`);
       return null;
@@ -1089,7 +1200,16 @@ class BotCore extends EventEmitter {
     // Reconcile fills immediately, then again shortly after for resting orders.
     await this.reconcileOrder(position, body.orderID);
     setTimeout(() => { this.reconcileOrder(position, body.orderID).catch(() => {}); }, 4000);
-    setTimeout(() => { this.cancelIfResting(position, body.orderID).catch(() => {}); }, this.cfg.risk.orderTimeoutSeconds * 1000);
+    // A taker order is killed on the account-wide timeout. A maker quote is
+    // killed on ITS OWN clock — the rest window the module chose — and
+    // `managePassiveEntries()` may cut it short before that if the model stops
+    // supporting the price. Both paths converge on `cancelPassiveEntry()`.
+    setTimeout(() => { this.cancelIfResting(position, body.orderID).catch(() => {}); },
+      (maker ? restSeconds : this.cfg.risk.orderTimeoutSeconds) * 1000);
+    if (maker) {
+      this.logLine('SUCCESS', `[LIVE] passive ${side} bid resting @ ${(amounts.price * 100).toFixed(1)}c for up to `
+        + `${restSeconds}s (${amounts.size} shares) via ${decision.strategyName}`);
+    }
     return position;
   }
 
@@ -1209,6 +1329,182 @@ class BotCore extends EventEmitter {
       this.logLine('INFO', `Cancelled resting order ${orderId.slice(0, 10)}… (${c && c.ok ? 'ok' : 'failed'})`);
       await this.reconcileOrder(position, orderId);
     }
+    // An order cancelled with no fill must become TERMINAL here. `reconcileOrder`
+    // only moves the status when the FILLED share count changes, so a cancelled
+    // unfilled order used to stay `PENDING` forever — and a PENDING position is
+    // open exposure, which parks the bot behind MAX_OPEN_POSITIONS with nothing
+    // actually at risk. Harmless while every entry was FAK; fatal the moment a
+    // resting order is a normal part of trading.
+    if (!(Number(position.filledShares) >= (Number(position.minOrderSize) || 0)) && !position.filledShares) {
+      position.status = 'CANCELLED';
+      position.cancelReason = position.cancelReason || 'unfilled remainder cancelled after the order timeout';
+      position.cancelledAt = new Date().toISOString();
+    }
+  }
+
+  // ------------------------------------------------- passive (maker) entries
+  /**
+   * True while a maker order still has unfilled size working on the book.
+   *
+   * A quote that filled completely is an ordinary position from here on; a
+   * partially filled one is still half an open order and still needs managing.
+   */
+  isRestingQuote(p) {
+    if (!p || !p.maker) return false;
+    if (BotCore.isTerminalPosition(p)) return false;
+    const requested = Number(p.requestedShares) || 0;
+    const filled = Number(p.filledShares) || 0;
+    return filled + 1e-9 < requested;
+  }
+
+  /**
+   * Reassess every resting quote, once per tick.
+   *
+   * This is where passive quoting is kept honest. A resting bid earns the
+   * spread and pays no fee, but it only earns them while the price is still
+   * right: the moment the model stops supporting the quote it is not liquidity
+   * provision, it is a standing offer to be adversely selected. So on every
+   * tick each quote is re-priced against the live TWAP model and pulled if it
+   * no longer clears its own edge gate.
+   *
+   * Runs before the entry path (and before the risk breakers) for the same
+   * reason exits do: a `return` further down the tick must never strand a live
+   * order on the book.
+   */
+  async managePassiveEntries() {
+    const resting = this.activePositions.filter(p => this.isRestingQuote(p));
+    if (!resting.length) return;
+    for (const pos of resting) {
+      try {
+        await this.manageOnePassiveEntry(pos);
+      } catch (e) {
+        this.logLine('WARN', `Passive quote check failed for ${pos.marketSlug}: ${e.message}`);
+      }
+    }
+  }
+
+  async manageOnePassiveEntry(pos) {
+    const now = Date.now();
+
+    // 1) The hard deadline: a quote is never left on the book indefinitely.
+    if (Number.isFinite(pos.quoteDeadlineMs) && now >= pos.quoteDeadlineMs) {
+      await this.cancelPassiveEntry(pos, `rest window of ${Number(pos.restSeconds).toFixed(0)}s elapsed`);
+      return;
+    }
+    // 2) Never work a quote into the closing seconds. The GTD expiry would get
+    //    there anyway; this names the reason instead of leaving it implicit.
+    if (Number.isFinite(pos.expiresAtEpoch)) {
+      const left = pos.expiresAtEpoch - Math.floor(now / 1000);
+      if (left <= this.cfg.risk.minSecondsToExpiry) {
+        await this.cancelPassiveEntry(pos,
+          `only ${left}s left in the window (MIN_SECONDS_TO_EXPIRY=${this.cfg.risk.minSecondsToExpiry}s)`);
+        return;
+      }
+    }
+
+    const book = await this.bookForDecision(pos.tokenId).catch(() => null);
+    if (!book) return;
+
+    // 3) The book moved through us. Either we were filled (the reconcile path
+    //    will say so) or the quote is now an offer to take at a worse price
+    //    than the one the edge gate tested.
+    if (book.bestAsk !== null && book.bestAsk !== undefined
+        && book.bestAsk < Number(pos.quotePrice) - 1e-9) {
+      await this.cancelPassiveEntry(pos,
+        `the ask has fallen to ${(book.bestAsk * 100).toFixed(1)}c, below the ${(Number(pos.quotePrice) * 100).toFixed(1)}c quote `
+        + '— it would take liquidity rather than make it');
+      return;
+    }
+
+    if (this.paperMode || pos.isPaper) {
+      await this.managePaperQuote(pos, book);
+      return;
+    }
+
+    // 4) Adverse selection: re-price the quote with the live settlement model.
+    //    This is the guard that separates market-making from warehousing — the
+    //    quote is only worth keeping while the model still says the price is
+    //    wrong in our favour.
+    const prob = await this.currentModelProb(pos);
+    if (Number.isFinite(prob)) {
+      const required = Number(pos.quotePrice) + (Number(pos.makerMinNetEdge) || 0);
+      if (prob < required) {
+        await this.cancelPassiveEntry(pos,
+          `model P=${(prob * 100).toFixed(1)}% no longer supports the ${(Number(pos.quotePrice) * 100).toFixed(1)}c quote `
+          + `(needs ≥${(required * 100).toFixed(1)}c with the ${(Number(pos.makerMinNetEdge) * 100).toFixed(2)}c buffer)`);
+      }
+    }
+  }
+
+  /**
+   * Paper simulation of a resting bid.
+   *
+   * `estimateBuyFill()` walks the ask ladder — it models TAKING, so using it
+   * here would fill every quote the instant it was placed and show this module
+   * winning trades it never got. A passive bid is reached only when the offer
+   * comes down to it, so that is the rule: the best ask must touch our price.
+   * We improved the best bid when placing, so we are at the front of the queue
+   * at that price and the fill is in full, at our price, with no taker fee.
+   */
+  async managePaperQuote(pos, book) {
+    if (book.bestAsk !== null && book.bestAsk !== undefined
+        && book.bestAsk <= Number(pos.quotePrice) + 1e-9) {
+      const shares = Number(pos.requestedShares) || 0;
+      const cost = shares * Number(pos.quotePrice);
+      if (!(shares > 0)) { pos.status = 'CANCELLED'; return; }
+      if (cost > this.paperBalance) {
+        await this.cancelPassiveEntry(pos,
+          `paper balance $${this.paperBalance.toFixed(2)} cannot cover $${cost.toFixed(2)}`);
+        return;
+      }
+      pos.filledShares = shares;
+      pos.filledUsd = cost;
+      pos.avgPrice = Number(pos.quotePrice);
+      pos.feeUsd = 0;                 // makers are not charged a taker fee
+      pos.status = 'FILLED';
+      this.paperBalance -= cost;
+      this.afterFill(pos);
+      this.logLine('SUCCESS', `[PAPER] passive ${pos.side} bid FILLED: ${shares} shares @ `
+        + `${(Number(pos.quotePrice) * 100).toFixed(1)}c = $${cost.toFixed(2)} (no taker fee) via ${pos.strategyName}`);
+      return;
+    }
+    if (Date.now() >= (Number(pos.quoteDeadlineMs) || 0)) {
+      await this.cancelPassiveEntry(pos,
+        `rest window of ${Number(pos.restSeconds).toFixed(0)}s elapsed with no fill`);
+    }
+  }
+
+  /** Re-derive the model probability for a position's market, with the live clock. */
+  async currentModelProb(position) {
+    const market = this.markets.find(m => m.slug === position.marketSlug)
+      || this.markets.find(m => m.conditionId === position.conditionId);
+    if (!market) return null;
+    const ctx = await this.buildContext(market).catch(() => null);
+    if (!ctx || !ctx.model || !Number.isFinite(ctx.model.pUp)) return null;
+    if (!ctx.windowOpenStatus || !ctx.windowOpenStatus.ok) return null;
+    return position.side === 'UP' ? ctx.model.pUp : ctx.model.pDown;
+  }
+
+  /** Pull a resting quote off the book and settle its position record. */
+  async cancelPassiveEntry(pos, why) {
+    const ids = (pos.orderIds || []).filter(id => id && id !== 'dry-run');
+    for (const id of ids) await this.clob.cancelOrder(id).catch(() => null);
+    for (const id of ids) await this.clob.getOrder(id).then(() => this.reconcileOrder(pos, id)).catch(() => null);
+    const filled = Number(pos.filledShares) || 0;
+    const min = Number(pos.minOrderSize) || 0;
+    pos.quoteClosedAt = new Date().toISOString();
+    if (filled > 0 && filled >= min) {
+      // Part of it filled before the rest was pulled. That is a real position
+      // on the fee-free side, so it stays — only the remainder was cancelled.
+      pos.status = 'FILLED';
+      pos.passiveCancelled = why;
+    } else {
+      pos.status = 'CANCELLED';
+      pos.cancelReason = why;
+      pos.cancelledAt = new Date().toISOString();
+    }
+    this.logLine('INFO', `Passive ${pos.side} quote @ ${(Number(pos.quotePrice) * 100).toFixed(1)}c withdrawn (${why}) — `
+      + (filled > 0 ? `${filled} shares kept` : 'no fill'));
   }
 
   onUserTrade(trade) {
@@ -2166,6 +2462,22 @@ class BotCore extends EventEmitter {
       // minimum viable order at current prices, so the UI can explain sizing
       minOrderUsdAt50c: +(minShares * 0.5).toFixed(2),
       activePositions: this.activePositions,
+      // Resting maker quotes. A quote is a live order, so the operator needs to
+      // see it working — and how long it has left — rather than inferring it
+      // from a PENDING row in the positions table.
+      passiveQuotes: this.activePositions.filter(p => this.isRestingQuote(p)).map(p => ({
+        id: p.id,
+        side: p.side,
+        marketSlug: p.marketSlug,
+        quotePrice: p.quotePrice,
+        requestedShares: p.requestedShares,
+        filledShares: Number(p.filledShares) || 0,
+        restSeconds: p.restSeconds,
+        secondsLeft: Number.isFinite(p.quoteDeadlineMs)
+          ? Math.max(0, Math.round((p.quoteDeadlineMs - Date.now()) / 1000))
+          : null,
+        strategy: p.strategy,
+      })),
       tradeHistory: this.tradeHistory.slice(0, 30),
       markets: this.markets.slice(0, 8),
       strategies: this.strategies.getState(),

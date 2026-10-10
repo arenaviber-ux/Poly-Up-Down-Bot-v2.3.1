@@ -138,6 +138,83 @@ function breakEvenProb(price, feeSchedule) {
   return clamp(price + feePerShare(price, feeSchedule), 0, 1);
 }
 
+// ------------------------------------------------------------ maker pricing
+/**
+ * Net edge per share for a MAKER (post-only) buy.
+ *
+ * Polymarket's crypto fee schedule is `{rate: 0.07, exponent: 1, takerOnly:
+ * true}` — taker-only. "Makers are never charged fees. Only takers pay fees."
+ * (docs.polymarket.com/trading/fees), and 20% of the taker fees collected in a
+ * market are redistributed daily to the makers in that market (Maker Rebates
+ * Program). So a resting bid pays NO fee at the moment of entry, which makes
+ *
+ *   edge_maker(p, q) = p - q          vs      edge_taker(p, a) = p - a - 0.07·a·(1-a)
+ *
+ * a difference worth up to 1.75c/share at 50c — i.e. the maker route converts
+ * the single largest cost in this bot into zero, and adds a rebate on top.
+ *
+ * The condition is that the order really is a maker order: it must rest below
+ * the best ask, and it is submitted with `postOnly` so the CLOB rejects it
+ * rather than letting it cross and take.
+ */
+function netEdgePerShareMaker(prob, price) {
+  return prob - price;
+}
+
+/**
+ * The maker counterpart to `entryEdgeTest()`.
+ *
+ * Same shape, two deliberate differences:
+ *
+ *   1. no fee term — a post-only fill is not charged the taker fee;
+ *   2. no slippage allowance — the quote IS the price, chosen by us. There is
+ *      no "ask + slippage" to walk, because we are not taking anything.
+ *
+ * `netEdgeIfCrossed` is reported alongside: if the book moved between
+ * evaluation and submission and the order did take after all, that is the edge
+ * that would apply. It is never used to pass the gate — it exists so the log
+ * line can be honest about the worst case.
+ *
+ * @param {object} p
+ * @param {number} p.prob               model probability for the side being quoted
+ * @param {number} p.quotePrice         the bid we would rest
+ * @param {number} p.tickSize
+ * @param {number} p.maxBuyPrice
+ * @param {object} p.feeSchedule        only used for the worst-case figure
+ * @param {number} p.moduleMinNetEdge
+ * @param {number} p.globalMinNetEdge   MIN_NET_EDGE, still an account-wide floor
+ * @param {boolean} [p.degraded]
+ */
+function makerEdgeTest({
+  prob, quotePrice, tickSize, maxBuyPrice, feeSchedule,
+  moduleMinNetEdge, globalMinNetEdge, degraded = false,
+}) {
+  const { roundPriceToTick } = require('./orderSigner');
+  const cap = Number.isFinite(maxBuyPrice) ? maxBuyPrice : 1;
+  const raw = Math.min(cap, Number(quotePrice));
+  // A BID rounds DOWN to the tick: rounding up could lift the quote onto the
+  // ask, which is the one thing a maker order must never do.
+  const executablePrice = Number.isFinite(tickSize) && tickSize > 0
+    ? roundPriceToTick(raw, tickSize, 'down')
+    : raw;
+
+  const moduleRequired = degraded ? moduleMinNetEdge * 1.5 : moduleMinNetEdge;
+  const effectiveMinNetEdge = Math.max(moduleRequired, globalMinNetEdge);
+
+  const netEdge = netEdgePerShareMaker(prob, executablePrice);
+  return {
+    executablePrice,
+    limitPrice: executablePrice,
+    quotePrice: executablePrice,
+    netEdge,
+    netEdgeIfCrossed: netEdgePerShare(prob, executablePrice, feeSchedule),
+    effectiveMinNetEdge,
+    moduleRequired,
+    ok: netEdge >= effectiveMinNetEdge && executablePrice >= (tickSize > 0 ? tickSize : 0),
+    limitedBy: moduleRequired >= globalMinNetEdge ? 'module' : 'global',
+  };
+}
+
 /**
  * The ONE entry edge test.
  *
@@ -346,12 +423,14 @@ module.exports = {
   VolatilityTracker,
   breakEvenProb,
   entryEdgeTest,
+  makerEdgeTest,
   expectedValue,
   fairProbUp,
   feePerShare,
   feeTotal,
   kellyStake,
   netEdgePerShare,
+  netEdgePerShareMaker,
   normalCdf,
   trailingTwap,
 };

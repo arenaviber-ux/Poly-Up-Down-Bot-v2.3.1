@@ -208,6 +208,65 @@ const CONFIG = {
       minNetEdge: num('SQS_MIN_EDGE', 0.01),
       minEntrySecondsLeft: num('SQS_MIN_LEFT', 8),
     },
+    /**
+     * 9) Passive Reversion — the only module that does not TAKE.
+     *
+     * Every other module buys at the ask and pays the taker fee, which on a
+     * crypto market is 0.07·p·(1−p) — up to 1.75c/share, the same order of
+     * magnitude as the edge being chased. This one rests a post-only bid below
+     * the market and is paid to wait: makers are never charged a fee on
+     * Polymarket, and 20% of the taker fees collected in the market are
+     * redistributed to makers daily.
+     *
+     * The edge it harvests is the gap between the book and the settlement
+     * reference. Since the TWAP upgrade the book swings hard (an ask can run
+     * 0.60 → 0.80 → 0.48 in seconds) while the 60s Chainlink TWAP that
+     * actually settles the market moves slowly. That makes the book's implied
+     * probability a noisy, mean-reverting series around the TWAP model's fair
+     * value — so instead of chasing the book we quote inside the spread and
+     * let the swing come to us.
+     *
+     * This is also the one edge class that is not a latency race: a resting bid
+     * is filled because it is the best price, not because it was first.
+     */
+    makerReversion: {
+      enabled: bool('ENABLE_STRAT_MAKER_REVERSION', true),
+      // Net edge required at the QUOTE price. Fee-free, so this is pure
+      // buffer — it is what pays for adverse selection when a fill happens
+      // because the market moved rather than because it was noisy.
+      minNetEdge: num('MR_MIN_EDGE', 0.015),
+      // Don't quote a side the model is not already leaning towards.
+      minProb: num('MR_MIN_PROB', 0.55),
+      // Hard cap. Above ~85c a fill is almost always toxic: you collect a cent
+      // and pick up a 90c loss when the "certainty" breaks.
+      maxQuotePrice: num('MR_MAX_QUOTE_PRICE', 0.85),
+      // How far above the best bid to join the queue. 1 tick puts us top of
+      // book; 0 joins it.
+      improveTicks: num('MR_IMPROVE_TICKS', 1),
+      // ...and how far BELOW it we will still call it a quote. When the edge
+      // gate or the price cap clamps our price well under the market, what is
+      // left is a bid nobody will ever hit: it holds an open position for the
+      // whole rest window and fills never. Stand down instead.
+      maxTicksBelowBid: num('MR_MAX_TICKS_BELOW_BID', 2),
+      // Only quote when the bid is dislocated from fair by at least this much.
+      // If the book already agrees with the model there is nothing to capture
+      // and we would just be warehousing inventory at fair value.
+      minDislocation: num('MR_MIN_DISLOCATION', 0.02),
+      // A quote needs real resting liquidity beneath it, or it is the whole
+      // book and every fill is someone dumping into us.
+      minBidDepthUsd: num('MR_MIN_BID_DEPTH', 150),
+      // Long enough for a swing to arrive, short enough that the window is
+      // still ours if it doesn't.
+      restSeconds: num('MR_REST_SECONDS', 20),
+      // Never leave a quote resting into the last seconds: it must be gone
+      // before MIN_SECONDS_TO_EXPIRY, with room for the cancel round trip.
+      cancelBufferSeconds: num('MR_CANCEL_BUFFER', 8),
+      // Submit with postOnly so the CLOB rejects a quote that would cross
+      // instead of letting it take (and pay the fee).
+      postOnly: bool('MR_POST_ONLY', true),
+      maxEntrySecondsLeft: num('MR_MAX_LEFT', 240),
+      minEntrySecondsLeft: num('MR_MIN_LEFT', 45),
+    },
   },
 
   // ------------------------------------------------------------------- risk
@@ -386,10 +445,11 @@ const ENTRY_FLOOR_ENV = {
   crossExchange: 'XEX_MIN_LEFT',
   volatilityBreakout: 'VB_MIN_LEFT',
   staleQuoteSnipe: 'SQS_MIN_LEFT',
+  makerReversion: 'MR_MIN_LEFT',
 };
 const HARD_CODED_ENTRY_FLOOR_DEFAULTS = {
   twapMomentum: 45, fairValueEv: 40, microstructure: 60, rsiReversion: 60,
-  crossExchange: 60, volatilityBreakout: 90, staleQuoteSnipe: 8,
+  crossExchange: 60, volatilityBreakout: 90, staleQuoteSnipe: 8, makerReversion: 45,
 };
 /** Names whose entry floor was raised by the account floor rather than chosen. */
 const entryFloorNotes = [];
@@ -518,6 +578,28 @@ function validateConfig(cfg = CONFIG) {
       errs.push(`AUTO_REDEEM_EVERY_MS must be >= 5000 (got ${cfg.redeem.everyMs}) — the relayer rate-limits and each sweep costs submissions`);
     }
   }
+
+  // A maker module whose quote can never rest is worse than no maker module:
+  // it would be evaluated every tick and place orders that are cancelled in
+  // the same breath.
+  const mr = cfg.strategies && cfg.strategies.makerReversion;
+  if (mr && mr.enabled) {
+    if (!(mr.maxQuotePrice > 0 && mr.maxQuotePrice < 1)) {
+      errs.push(`MR_MAX_QUOTE_PRICE must be in (0, 1) (got ${mr.maxQuotePrice})`);
+    }
+    if (!(mr.restSeconds > 0)) {
+      errs.push(`MR_REST_SECONDS must be > 0 (got ${mr.restSeconds}) — a quote cancelled the instant it is placed is a taker order with extra steps`);
+    }
+    const usable = Number(mr.minEntrySecondsLeft) - Number(cfg.risk.minSecondsToExpiry) - Number(mr.cancelBufferSeconds);
+    if (Number.isFinite(usable) && usable <= 0) {
+      errs.push(`makerReversion can never place a resting quote: MR_MIN_LEFT=${mr.minEntrySecondsLeft}s `
+        + `- MIN_SECONDS_TO_EXPIRY=${cfg.risk.minSecondsToExpiry}s - MR_CANCEL_BUFFER=${mr.cancelBufferSeconds}s `
+        + `leaves ${usable}s. Raise MR_MIN_LEFT or lower the buffer`);
+    }
+    if (!(mr.minDislocation > 0)) {
+      errs.push(`MR_MIN_DISLOCATION must be > 0 (got ${mr.minDislocation}) — quoting at fair value is how a maker turns into a warehouse`);
+    }
+  }
   return errs;
 }
 
@@ -593,6 +675,33 @@ function configWarnings(cfg = CONFIG) {
   if (cfg.exit && !cfg.exit.enabled && cfg.redeem && !cfg.redeem.enabled) {
     out.push('EXIT_ENABLED=false and AUTO_REDEEM=false: nothing converts wins back into tradeable collateral. '
       + 'In live mode the bot will drain its balance and then stop trading while realised P&L keeps rising.');
+  }
+  /**
+   * Passive Reversion is the one module whose execution style is not the
+   * configured ORDER_TYPE. Say so, because "I set ORDER_TYPE=FAK" is a
+   * reasonable thing to believe and it does not apply here.
+   */
+  const mr = cfg.strategies && cfg.strategies.makerReversion;
+  if (mr && mr.enabled) {
+    out.push(`makerReversion rests post-only GTD bids, so ORDER_TYPE=${cfg.order.orderType} does not apply to it `
+      + `(it always uses GTD + postOnly=${mr.postOnly ? 'true' : 'false'}). Makers are never charged the taker fee on `
+      + 'Polymarket, so its edge is measured without one.');
+    if (mr.postOnly === false) {
+      out.push('MR_POST_ONLY=false: a quote that crosses the spread will execute as a taker and be charged the '
+        + '0.07 crypto fee, while the edge gate still measured the trade as fee-free');
+    }
+    // While a quote rests it is an open position, so MAX_OPEN_POSITIONS=1
+    // parks the rest of the book for the duration. That is a real cost and it
+    // is the operator's call, not something to discover from a quiet dashboard.
+    const usable = Number(mr.maxEntrySecondsLeft) - Number(cfg.risk.minSecondsToExpiry) - Number(mr.cancelBufferSeconds);
+    if (Number.isFinite(usable) && Number(mr.restSeconds) > usable) {
+      out.push(`MR_REST_SECONDS=${mr.restSeconds}s exceeds the ${usable}s the module's widest entry window allows — `
+        + 'quotes will be cut short by the cancel deadline');
+    }
+    if (cfg.risk.maxOpenPositions <= 1) {
+      out.push(`makerReversion holds an open position while a quote rests (up to ${mr.restSeconds}s), and `
+        + `MAX_OPEN_POSITIONS=${cfg.risk.maxOpenPositions} — no other module can trade in that window during the rest`);
+    }
   }
   if (cfg.redeem && cfg.redeem.enabled && !cfg.relayer.apiKey && !cfg.relayer.builderApiKey) {
     out.push('AUTO_REDEEM=true but no RELAYER_API_KEY (and no Builder key) is set — the redemption sweeper cannot '

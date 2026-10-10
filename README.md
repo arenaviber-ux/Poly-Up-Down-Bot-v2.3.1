@@ -26,13 +26,61 @@ itemised diff against the original.
 | **Live order path** (POST /order → reconcile → cancel remainder) | ✅ FAK/GTD, `deferExec`, post-only |
 | **Settlement** from `market_resolved`, with a layered REST fallback | ✅ never guesses an outcome |
 | **5-share minimum** enforcement (not "$1") | ✅ bump or skip, your choice |
-| **Fee-aware** (crypto taker 0.07, peaks at 50c) | ✅ every edge is net of fees |
+| **Fee-aware** (crypto taker 0.07, peaks at 50c) | ✅ every edge is net of fees — and module 9 pays no fee at all, because the schedule is taker-only |
 | **TWAP settlement model** (60s Chainlink TWAP vs price to beat) | ✅ real feed via PolyBolt, spot-proxy fallback labelled |
 | Paper mode on the **real** book, fees and resolutions | ✅ |
 | Geoblock preflight, stop-loss, daily loss cap, allowance checks | ✅ |
 | 8 strategy modules rebuilt | ✅ see `STRATEGIES.md` |
+| **9th module: Passive Reversion — the maker route** | ✅ v2.4, see `STRATEGIES.md` §9 |
 | **Pre-expiry exit** — sells a model-decided position 10–45s before close | ✅ v2.3, see `CAPITAL-RECYCLING.md` |
 | **On-chain redemption sweeper** — claims resolved wins via the gasless Relayer | ✅ v2.3, needs Relayer API keys |
+
+---
+
+## v2.4 — the ninth module makes instead of takes
+
+Modules 1–8 are eight different triggers for one trade: buy a side at the ask.
+That means every one of them pays Polymarket's crypto taker fee,
+`0.07 · p · (1 − p)` — **up to 1.75¢ per share at 50¢**, which is the same size
+as the 1–3¢ edges the modules chase. The fee is not a cost on the trade; on a
+3¢ edge it *is* half the trade.
+
+That fee schedule is `takerOnly`. Per Polymarket's own documentation: *"Makers
+are never charged fees. Only takers pay fees."*, and 20% of the taker fees
+collected in a market are redistributed daily to the makers quoting in it. So
+the cheapest possible improvement to this bot is not a smarter trigger — it is
+not taking.
+
+**Module 9, Passive Reversion**, rests a **post-only bid inside the spread**,
+one tick above the best bid, whenever the book has swung at least
+`MR_MIN_DISLOCATION` (2¢) below what the TWAP model says the side is worth. It
+is submitted `GTD` + `postOnly` for up to `MR_REST_SECONDS` (20s), and
+`BotCore.managePassiveEntries()` re-prices it on **every tick** and pulls it the
+moment the model stops supporting it — because a quote that no longer has an
+edge is not liquidity provision, it is a standing offer to be picked off.
+
+Two reasons it is the highest-value addition here:
+
+* **It removes the largest term in the P&L, not a fraction of it.** At 50¢ the
+  maker route is worth 1.75¢/share more than taking *at the same price*.
+* **It is the only edge that is not a latency race.** As the honest-expectations
+  section of `STRATEGIES.md` says, the momentum and divergence modules compete
+  with co-located market makers; from a home connection you lose that race. A
+  resting bid is filled because it is the best price on the book, not because
+  it arrived first.
+
+The risk is named and guarded: **adverse selection** — you are filled because
+somebody chose your price. `MR_MIN_EDGE` is the premium charged for it (with no
+fee to pay, the whole 1.5¢ threshold is insurance), `MR_MAX_QUOTE_PRICE` (85¢)
+keeps the module away from near-certain outcomes where a fill is nearly always
+toxic, and the module refuses to quote at all on the degraded spot-proxy feed.
+
+Full mechanics, the guard table and the tuning notes: **`STRATEGIES.md` §9**.
+Tests: `npm run test:maker`.
+
+> One operational note: a resting quote counts as an open position, so with the
+> shipped `MAX_OPEN_POSITIONS=1` nothing else trades in that window while it
+> rests. `configWarnings()` says so at startup.
 
 ---
 
@@ -404,7 +452,7 @@ wsMarket.js          market WebSocket (book state, heartbeat, reconnect)
 wsUser.js            private WebSocket (fills, order state)
 referencePrice.js    PolyBolt Chainlink TWAP + Coinbase/Kraken fallback
 marketDiscovery.js   slug discovery, constraint harvesting, settlement resolver
-strategyEngine.js    the 8 modules
+strategyEngine.js    the 9 modules
 exitManager.js       v2.3 pre-expiry exit: gates, sizing against bid depth, exit-adjusted payout
 relayerClient.js     v2.3 gasless Relayer: WALLET/SAFE/PROXY signing, CREATE2, redeemPositions calldata
 redeemer.js          v2.3 redemption sweeper: queue, resolution policy, polling, history
