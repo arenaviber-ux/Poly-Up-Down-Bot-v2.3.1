@@ -695,7 +695,7 @@
         <div class="card-header">
           <div class="card-title">
             <span>🧠</span> Strategy Modules
-            <span class="strategy-count" id="strategyCount">8/8 enabled</span>
+            <span class="strategy-count" id="strategyCount">9/9 enabled</span>
           </div>
         </div>
         <div class="card-body">
@@ -799,6 +799,19 @@
             </div>
             <label class="switch">
               <input type="checkbox" id="stratStaleSnipe" data-strategy="staleQuoteSnipe" checked onchange="updateStrategySettings()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Passive Reversion (maker) -->
+          <div class="strategy-item" data-strategy="makerReversion">
+            <div class="strategy-meta">
+              <span class="strategy-title">9. Passive Reversion <span style="color:#34d399;">(maker)</span></span>
+              <span class="strategy-desc">The only module that does not take. Rests a post-only bid one tick above the best bid when the book has swung ≥2c below the TWAP model's fair value. Makers pay no fee on Polymarket (crypto taker rate is 0.07, up to 1.75c/share), so it earns the spread instead of paying it — and it wins on price, not latency.</span>
+              <span class="strategy-stat" id="stat-makerReversion">—</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="stratMakerReversion" data-strategy="makerReversion" checked onchange="updateStrategySettings()">
               <span class="slider"></span>
             </label>
           </div>

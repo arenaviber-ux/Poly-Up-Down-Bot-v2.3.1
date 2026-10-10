@@ -583,9 +583,12 @@ const TEST_TEST_ADDR = new Wallet(TEST_TEST_PK).address;
     assert.deepStrictEqual(r.applied, []);
   });
 
-  test('each of the 8 modules is skipped when disabled and run when enabled', () => {
+  // 8 modules became 9 in v2.4: Passive Reversion is the maker route. The
+  // count is asserted so adding a tenth module forces this test to be looked
+  // at, rather than silently covering one fewer module than the bot ships.
+  test('each of the 9 modules is skipped when disabled and run when enabled', () => {
     const keys = Object.keys(new StrategyEngine(CONFIG).strategies);
-    assert.strictEqual(keys.length, 8);
+    assert.strictEqual(keys.length, 9);
     for (const key of keys) {
       const ctx = makeCtx();
       const engine = ctx.engine;

@@ -18,7 +18,8 @@
  * some modules; `resolveStrategyKey()` reconciles them so a toggle is never
  * dropped for a spelling mismatch.
  */
-const { netEdgePerShare, breakEvenProb, entryEdgeTest } = require('./pricing');
+const { netEdgePerShare, breakEvenProb, entryEdgeTest, makerEdgeTest } = require('./pricing');
+const { roundPriceToTick } = require('./orderSigner');
 
 /**
  * Key aliases.
@@ -37,6 +38,7 @@ const STRATEGY_ALIASES = {
   crossExchange: ['crossExchange', 'crossExchangeDivergence', 'crossVenue', 'cross_venue', 'xex'],
   volatilityBreakout: ['volatilityBreakout', 'volBreakout', 'vb'],
   staleQuoteSnipe: ['staleQuoteSnipe', 'staleSnipe', 'sqs'],
+  makerReversion: ['makerReversion', 'maker_reversion', 'passiveReversion', 'passive', 'maker', 'makerQuote', 'mr'],
 };
 
 function normaliseKey(k) {
@@ -70,6 +72,7 @@ class StrategyEngine {
       crossExchange: { enabled: true, name: 'Cross-Venue Divergence' },
       volatilityBreakout: { enabled: true, name: 'Volatility Breakout' },
       staleQuoteSnipe: { enabled: true, name: 'Stale-Quote Snipe' },
+      makerReversion: { enabled: true, name: 'Passive Reversion (maker)' },
     };
     // Config may use the canonical name or any alias, so TWAP_MOMENTUM_* /
     // `twapMomentum.enabled` correctly drives `latencyExploitation`.
@@ -325,6 +328,133 @@ class StrategyEngine {
     return pool[0];
   }
 
+  /**
+   * Build a RESTING bid for one side — the maker counterpart to `candidate()`.
+   *
+   * `candidate()` asks "is the ask cheap enough to take?". This asks the
+   * opposite question: "is there a price below the market at which we are paid
+   * to wait?". Three things follow from that and drive the checks below:
+   *
+   *   1. The quote must never cross the spread. A bid at or above the ask is a
+   *      taker order, and it is charged the 0.07 crypto fee — the exact cost
+   *      this module exists to avoid. The CLOB is also sent `postOnly` so a
+   *      quote that would cross is rejected rather than filled.
+   *   2. Without a fee term the whole `minNetEdge` threshold is adverse-
+   *      selection insurance, so it is enforced just as strictly here.
+   *   3. A resting bid is only worth posting when the book has swung away from
+   *      fair value. Quoting at fair value is not market-making, it is
+   *      warehousing: you get filled precisely when you were wrong.
+   */
+  makerCandidate(ctx, side, { minNetEdge, reason, degraded = false, cfg: c }) {
+    const book = side === 'UP' ? ctx.books.up : ctx.books.down;
+    const prob = side === 'UP' ? ctx.model.pUp : ctx.model.pDown;
+    if (!book) return { reason: `no ${side} book` };
+    if (book.bestBid === null || book.bestBid === undefined) return { reason: `no bid on ${side} to quote behind` };
+    if (!Number.isFinite(prob)) return { reason: `no model probability for ${side}` };
+    if (prob < c.minProb) {
+      return { reason: `${side} P=${(prob * 100).toFixed(1)}% < ${(c.minProb * 100).toFixed(0)}%` };
+    }
+    if (book.spread !== null && book.spread !== undefined && book.spread * 100 > this.cfg.risk.maxSpreadCents) {
+      return { reason: `${side} spread ${(book.spread * 100).toFixed(1)}c > ${this.cfg.risk.maxSpreadCents}c` };
+    }
+    if (Number.isFinite(book.bidDepthUsd) && book.bidDepthUsd < c.minBidDepthUsd) {
+      return { reason: `${side} bid depth $${book.bidDepthUsd.toFixed(0)} < $${c.minBidDepthUsd}` };
+    }
+
+    // The trigger: how far the best bid sits below model fair value. This is
+    // the dislocation the module is harvesting, so it is also what the
+    // dashboard reports when the module declines.
+    const dislocation = prob - book.bestBid;
+    if (dislocation < c.minDislocation) {
+      return {
+        reason: `${side} bid ${(book.bestBid * 100).toFixed(1)}c is only ${(dislocation * 100).toFixed(2)}c below fair `
+          + `${(prob * 100).toFixed(1)}c (need ≥${(c.minDislocation * 100).toFixed(1)}c of dislocation)`,
+      };
+    }
+
+    const tick = (ctx.constraints && ctx.constraints.tickSize) || this.cfg.order.tickSize;
+    const ceiling = Math.min(prob - minNetEdge, c.maxQuotePrice);
+    const floorBelowBid = book.bestBid - c.maxTicksBelowBid * tick;
+    if (!(ceiling > 0)) {
+      return {
+        reason: `${side} fair ${(prob * 100).toFixed(1)}c leaves no room under the ${(c.maxQuotePrice * 100).toFixed(0)}c quote cap `
+          + `after a ${(minNetEdge * 100).toFixed(1)}c buffer`,
+      };
+    }
+
+    // Join the queue (or improve it by `improveTicks`), but never reach the ask.
+    let q = book.bestBid + c.improveTicks * tick;
+    q = Math.min(q, ceiling);
+    if (book.bestAsk !== null && book.bestAsk !== undefined) q = Math.min(q, book.bestAsk - tick);
+    q = roundPriceToTick(q, tick, 'down');   // a BID rounds DOWN: rounding up can cross
+    if (!(q >= tick)) {
+      return { reason: `${side} quote would rest at ${(q * 100).toFixed(1)}c, below the ${(tick * 100).toFixed(0)}c tick floor` };
+    }
+    if (book.bestAsk !== null && book.bestAsk !== undefined && !(q < book.bestAsk - 1e-9)) {
+      return {
+        reason: `${side} quote ${(q * 100).toFixed(1)}c would rest at or above the ${(book.bestAsk * 100).toFixed(1)}c ask `
+          + '— that takes liquidity and pays the taker fee',
+      };
+    }
+    if (!(q >= floorBelowBid)) {
+      return {
+        reason: `${side} best price worth paying is ${(q * 100).toFixed(1)}c, which is `
+          + `${((book.bestBid - q) / tick).toFixed(0)} ticks below the ${(book.bestBid * 100).toFixed(1)}c bid `
+          + `(max ${c.maxTicksBelowBid}) — a bid that far from the market would not fill, it would just hold a slot`,
+      };
+    }
+
+    const t = makerEdgeTest({
+      prob,
+      quotePrice: q,
+      tickSize: tick,
+      maxBuyPrice: this.cfg.order.maxBuyPrice,
+      feeSchedule: ctx.feeSchedule,
+      moduleMinNetEdge: minNetEdge,
+      globalMinNetEdge: this.cfg.fees.minNetEdge,
+      degraded,
+    });
+    if (!t.ok) {
+      const who = t.limitedBy === 'global'
+        ? `MIN_NET_EDGE floor ${(t.effectiveMinNetEdge * 100).toFixed(2)}c`
+        : `module gate ${(t.effectiveMinNetEdge * 100).toFixed(2)}c${degraded ? ' (degraded: 1.5x)' : ''}`;
+      return {
+        reason: `${side} maker edge ${(t.netEdge * 100).toFixed(2)}c at a ${(t.executablePrice * 100).toFixed(1)}c quote `
+          + `is below the ${who}`,
+      };
+    }
+
+    // What the taker route would have charged for the same share. It is the
+    // honest measure of what being patient is worth, and it is the number that
+    // makes the module's dashboard line self-explanatory.
+    const feeAvoided = t.netEdge - t.netEdgeIfCrossed;
+
+    return {
+      signal: side === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
+      side,
+      prob,
+      price: t.executablePrice,
+      // Ranked on the same `edge` field as every taker signal, so the two are
+      // directly comparable: this one is simply not paying a fee to get it.
+      edge: t.netEdge,
+      edgeIfCrossed: t.netEdgeIfCrossed,
+      feeAvoidedPerShare: feeAvoided,
+      executionPrice: t.executablePrice,
+      quotePrice: t.executablePrice,
+      bestBid: book.bestBid,
+      bestAsk: book.bestAsk,
+      dislocation,
+      effectiveMinNetEdge: t.effectiveMinNetEdge,
+      edgeLimitedBy: t.limitedBy,
+      // A maker is charged no fee, so break-even is the quote price itself.
+      breakEven: t.executablePrice,
+      maker: true,
+      postOnly: c.postOnly !== false,
+      reason,
+      degraded,
+    };
+  }
+
   // ------------------------------------------------------------ strategies
   /**
    * 1) TWAP Momentum (previously "Latency Exploitation").
@@ -549,6 +679,80 @@ class StrategyEngine {
   }
 
   /**
+   * 9) Passive Reversion (maker).
+   *
+   * The only module that does not take liquidity.
+   *
+   * Every other module buys at the ask and pays the crypto taker fee,
+   * 0.07·p·(1−p) — up to 1.75c/share, which is the same size as the edges they
+   * chase. Polymarket's fee schedule is `takerOnly`: makers are never charged,
+   * and 20% of the fees collected in a market are redistributed daily to that
+   * market's makers. So the maker route does not shave the cost of a trade, it
+   * removes its largest term.
+   *
+   * What it harvests is the gap between the book and the settlement reference.
+   * Since the TWAP upgrade the book swings hard while the 60-second Chainlink
+   * TWAP that actually settles the window moves slowly — an ask can run
+   * 0.60 → 0.80 → 0.48 in seconds on a reference that barely moved. That makes
+   * the book's implied probability a noisy, mean-reverting series around the
+   * TWAP model's fair value, so instead of chasing the book we quote inside the
+   * spread at a model-anchored price and let the swing come to us.
+   *
+   * It is also the one edge in this bot that is not a latency race. A resting
+   * bid is filled because it is the best price on the book, not because it got
+   * there first — which matters, because every other module here is competing
+   * with co-located market makers from a home connection.
+   *
+   * The trade-off is inventory risk: an unfilled quote earns nothing, and a
+   * filled quote only pays if the model was right. `minNetEdge` is the premium
+   * charged for that risk, and BotCore cancels the quote the moment the model
+   * stops supporting it (see `managePassiveEntries`).
+   */
+  makerReversion(ctx) {
+    const c = this.cfg.strategies.makerReversion;
+    if (!c) return { reason: 'makerReversion has no configuration block' };
+
+    // A resting quote is priced off the settlement model for its whole life,
+    // so it is the one thing here that must not be built on the spot proxy.
+    // Every other module degrades gracefully; this one stands down.
+    if (ctx.degraded) {
+      return { reason: 'maker quoting needs the authoritative TWAP feed (running on the spot proxy)' };
+    }
+
+    const left = ctx.market.remainingSec;
+    const pre = this.preflight(ctx, { minSecondsLeft: c.minEntrySecondsLeft, maxSecondsLeft: c.maxEntrySecondsLeft });
+    if (!pre.ok) return { reason: pre.reason };
+
+    // How long the quote is actually allowed to rest: it must be off the book
+    // before MIN_SECONDS_TO_EXPIRY, with room for the cancel round trip.
+    const reserve = this.cfg.risk.minSecondsToExpiry + c.cancelBufferSeconds;
+    const restSeconds = Math.min(c.restSeconds, Math.max(0, left - reserve));
+    if (!(restSeconds > 0)) {
+      return {
+        reason: `only ${left.toFixed(0)}s left and a quote must be cancelled ${reserve}s before close `
+          + `— ${Math.max(0, left - reserve).toFixed(0)}s of rest is not worth posting`,
+      };
+    }
+
+    const opts = { minNetEdge: c.minNetEdge, degraded: ctx.degraded, cfg: c };
+    const up = this.makerCandidate(ctx, 'UP', opts);
+    const down = this.makerCandidate(ctx, 'DOWN', opts);
+    const pool = [up, down].filter(x => x && x.signal).sort((a, b) => b.edge - a.edge);
+    if (!pool.length) {
+      const rejects = [up, down].filter(x => x && x.reason).map(x => x.reason);
+      return { reason: rejects.length ? rejects.join(' | ') : 'neither side is quotable' };
+    }
+
+    const best = pool[0];
+    best.restSeconds = restSeconds;
+    best.reason = `rest ${(best.quotePrice * 100).toFixed(1)}c behind a ${(best.bestBid * 100).toFixed(1)}c bid `
+      + `(fair ${(best.prob * 100).toFixed(1)}c, ${(best.dislocation * 100).toFixed(1)}c dislocation, `
+      + `${(best.edge * 100).toFixed(2)}c edge fee-free vs ${(best.edgeIfCrossed * 100).toFixed(2)}c if taken) `
+      + `for up to ${restSeconds.toFixed(0)}s`;
+    return best;
+  }
+
+  /**
    * Evaluate every enabled module against the current context. Returns the
    * highest-edge signal (all module outcomes are recorded for the dashboard).
    */
@@ -562,6 +766,7 @@ class StrategyEngine {
       'microstructure',
       'crossExchange',
       'rsiReversion',
+      'makerReversion',
     ];
     const results = [];
     for (const key of order) {
