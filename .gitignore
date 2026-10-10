@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Secrets — the .env holds a private key. The template is the only one tracked.
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Runtime state — positions, P&L and the live/paper choice. This is
+# per-deployment, not source: committing it meant one machine's LIVE
+# setting was cloned onto another's.
+bot_state.json
+*_state.json
