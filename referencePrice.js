@@ -102,8 +102,13 @@ class ReferencePrice extends EventEmitter {
 
     ws.on('open', () => {
       this.polybolt.connected = true;
+      // getCredentials() returns { apiKey, apiSecret, apiPassphrase }. This
+      // used to read `c.passphrase`, which is undefined, so JSON.stringify
+      // dropped the field and PolyBolt answered `auth_required` for every
+      // connection — the bot then sat on the spot proxy forever even with
+      // perfectly valid CLOB credentials.
       const c = this.auth.getCredentials();
-      ws.send(JSON.stringify({ op: 'auth', auth: { apiKey: c.apiKey, secret: c.apiSecret, passphrase: c.passphrase } }));
+      ws.send(JSON.stringify({ op: 'auth', auth: { apiKey: c.apiKey, secret: c.apiSecret, passphrase: c.apiPassphrase } }));
       ws.send(JSON.stringify({
         op: 'subscribe',
         subscriptions: [
