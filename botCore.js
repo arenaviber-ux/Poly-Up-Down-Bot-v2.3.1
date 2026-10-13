@@ -205,6 +205,16 @@ class BotCore extends EventEmitter {
     this.marketStream.connect();
     if (!this.paperMode) this.userStream.connect();
     this.logLine('INFO', `Bot started in ${this.paperMode ? 'PAPER' : 'LIVE'} mode (${this.cfg.market.asset.toUpperCase()} ${this.cfg.market.timeframes.join('/')})`);
+    // Derive CLOB credentials in paper mode too, then retry the PolyBolt
+    // settlement feed. ref.start() ran above without credentials, so PolyBolt
+    // would otherwise sit in spot-proxy until the discovery self-heal. Needs a
+    // signing key; without one there is nothing to derive and ensurePolybolt()
+    // is a harmless no-op. In live mode runLivePreflight() awaits the same
+    // promise and reports its own failure, so only paper mode logs it here.
+    const derive = this.auth.wallet ? this.ensureClobCredentials() : Promise.resolve();
+    derive
+      .catch((e) => { if (this.paperMode) this.logLine('ERROR', `Credential derivation failed: ${e.message}`); })
+      .finally(() => this.ref.ensurePolybolt());
     this.discoveryTimer = setInterval(() => this.refreshMarkets().catch(e => this.logLine('ERROR', `discovery: ${e.message}`)), this.cfg.runtime.discoveryMs);
     this.loopTimer = setInterval(() => this.tick().catch(e => this.logLine('ERROR', `loop: ${e.message}`)), this.cfg.runtime.loopMs);
     // Redemption runs on its own timer rather than inside `tick()`: a sweep can
@@ -318,6 +328,23 @@ class BotCore extends EventEmitter {
     this.logLine('WARN', `Bot stopped: ${reason}`);
   }
 
+  /**
+   * Derive CLOB L2 credentials if none are held. Resolves once they exist;
+   * rejects if derivation fails. Concurrent callers (start() and the live
+   * preflight) share one in-flight derivation rather than racing two.
+   */
+  ensureClobCredentials() {
+    if (this.auth.hasL2Credentials()) return Promise.resolve();
+    if (!this.credentialDerivation) {
+      this.credentialDerivation = this.auth.deriveApiCredentials()
+        .then(() => {
+          this.logLine('SUCCESS', `CLOB credentials ${this.auth.credentialsSource} for signer ${this.auth.signerAddress.slice(0, 8)}…`);
+        })
+        .finally(() => { this.credentialDerivation = null; });
+    }
+    return this.credentialDerivation;
+  }
+
   /** Live-mode prerequisites: geoblock, credentials, balance, allowance, clock. */
   async runLivePreflight() {
     const geo = await this.auth.checkGeoblock();
@@ -334,14 +361,11 @@ class BotCore extends EventEmitter {
       this.logLine('ERROR', `Wallet config: ${wallet.error}`);
       return { ok: false, reason: wallet.error };
     }
-    if (!this.auth.hasL2Credentials()) {
-      try {
-        await this.auth.deriveApiCredentials();
-        this.logLine('SUCCESS', `CLOB credentials ${this.auth.credentialsSource} for signer ${this.auth.signerAddress.slice(0, 8)}…`);
-      } catch (e) {
-        this.logLine('ERROR', `Credential derivation failed: ${e.message}`);
-        return { ok: false, reason: e.message };
-      }
+    try {
+      await this.ensureClobCredentials();
+    } catch (e) {
+      this.logLine('ERROR', `Credential derivation failed: ${e.message}`);
+      return { ok: false, reason: e.message };
     }
     const bal = await this.auth.checkBalanceAllowance().catch(() => null);
     if (bal && bal.ok) {
