@@ -1635,6 +1635,51 @@ const TEST_TEST_ADDR = new Wallet(TEST_TEST_PK).address;
     assert.strictEqual(second.twap, 100000, 'the next pass should pick the value up');
   });
 
+  testAsync('the PolyBolt auth frame carries all three CLOB credentials', async () => {
+    // Regression: connectPolybolt() read `c.passphrase` from an object whose
+    // field is `apiPassphrase`, so JSON.stringify dropped the passphrase and
+    // PolyBolt answered `auth_required` on every connect. The bot then ran on
+    // the spot proxy indefinitely with perfectly valid credentials, and the
+    // maker module — which refuses the proxy — never quoted at all.
+    const http = require('http');
+    const { WebSocketServer } = require('ws');
+    const server = http.createServer();
+    const wss = new WebSocketServer({ server });
+    const frames = [];
+    const gotAuth = new Promise((resolve) => {
+      wss.on('connection', (sock) => {
+        sock.on('message', (d) => {
+          const m = JSON.parse(d.toString());
+          frames.push(m);
+          if (m.op === 'auth') resolve(m);
+        });
+      });
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const port = server.address().port;
+
+    const { ReferencePrice } = require('../referencePrice');
+    const cfg = JSON.parse(JSON.stringify(CONFIG));
+    cfg.endpoints.polyboltWs = `ws://127.0.0.1:${port}/ws`;
+    const auth = {
+      hasL2Credentials: () => true,
+      getCredentials: () => ({ apiKey: 'key-1', apiSecret: 'secret-1', apiPassphrase: 'pass-1' }),
+    };
+    const ref = new ReferencePrice(cfg, auth);
+    try {
+      ref.connectPolybolt();
+      const frame = await Promise.race([
+        gotAuth,
+        new Promise((_, rej) => setTimeout(() => rej(new Error('no auth frame within 3s')), 3000)),
+      ]);
+      assert.deepStrictEqual(frame.auth, { apiKey: 'key-1', secret: 'secret-1', passphrase: 'pass-1' });
+      assert.ok(frames.some(f => f.op === 'subscribe'), 'a subscribe frame should follow the auth frame');
+    } finally {
+      ref.stop();
+      await new Promise((r) => wss.close(() => server.close(r)));
+    }
+  });
+
   section('v2.2 — a fired signal that does not trade says so');
 
   test('the single edge gate names the module and shows both prices', async () => {
