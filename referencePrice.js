@@ -44,7 +44,7 @@ class ReferencePrice extends EventEmitter {
     });
     this.windowOpens = new Map(); // epochSeconds -> {twap, source, at, ...}
     this.twapHistory = [];       // [{t, value}] — bounded, for window-open backfill
-    this.polybolt = { ws: null, authed: false, connected: false, lastError: null, seq: null, dropped: 0 };
+    this.polybolt = { ws: null, authed: false, connected: false, lastError: null, seqByChannel: Object.create(null), dropped: 0 };
     this.sockets = { coinbase: null, kraken: null };
     this.closedByUser = false;
   }
@@ -102,6 +102,9 @@ class ReferencePrice extends EventEmitter {
 
     ws.on('open', () => {
       this.polybolt.connected = true;
+      // Sequence numbers belong to this WebSocket session; a reconnect may
+      // start a fresh sequence for each subscribed channel.
+      this.polybolt.seqByChannel = Object.create(null);
       // getCredentials() returns { apiKey, apiSecret, apiPassphrase }. This
       // used to read `c.passphrase`, which is undefined, so JSON.stringify
       // dropped the field and PolyBolt answered `auth_required` for every
@@ -162,12 +165,23 @@ class ReferencePrice extends EventEmitter {
 
   handlePolyboltFrame(msg) {
     const channel = msg.channel;
+    const sequenceChannel = typeof channel === 'string' && channel ? channel : 'unknown';
     const payload = msg.payload || {};
-    if (msg.seq !== undefined && this.polybolt.seq !== null && msg.seq < this.polybolt.seq) {
-      this.log('WARN', `[ref:polybolt] sequence regression ${msg.seq} < ${this.polybolt.seq}`);
-    }
-    if (msg.seq !== undefined) this.polybolt.seq = msg.seq;
     if (msg.dropped) this.polybolt.dropped += Number(msg.dropped) || 0;
+
+    // The socket carries multiple channels, whose sequence counters may be
+    // independent. Compare each frame only with the last sequence for its own
+    // channel so normal TWAP/spot interleaving is not reported as regression.
+    const hasSequence = msg.seq !== undefined && msg.seq !== null && msg.seq !== '';
+    const sequence = hasSequence ? Number(msg.seq) : NaN;
+    if (Number.isFinite(sequence)) {
+      const previousSequence = this.polybolt.seqByChannel[sequenceChannel];
+      if (previousSequence !== undefined && sequence < previousSequence) {
+        this.log('WARN', `[ref:polybolt] sequence regression channel=${sequenceChannel} ${sequence} < ${previousSequence}; ignoring stale frame`);
+        return;
+      }
+      this.polybolt.seqByChannel[sequenceChannel] = sequence;
+    }
 
     if (channel === 'price.crypto.twap') {
       const data = Array.isArray(payload.data) ? payload.data : null;

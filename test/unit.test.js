@@ -849,13 +849,13 @@ const TEST_TEST_ADDR = new Wallet(TEST_TEST_PK).address;
 
   const { ReferencePrice } = require('../referencePrice');
 
-  function makeRef(hasCreds) {
+  function makeRef(hasCreds, log = () => {}) {
     const cfg = JSON.parse(JSON.stringify(CONFIG));
     cfg.runtime.referenceSource = 'auto';
     return new ReferencePrice(cfg, {
       hasL2Credentials: () => hasCreds,
       getCredentials: () => ({ apiKey: 'k', apiSecret: 's', passphrase: 'p' }),
-    }, { log: () => {} });
+    }, { log });
   }
 
   test('ensurePolybolt does nothing without credentials', () => {
@@ -892,6 +892,40 @@ const TEST_TEST_ADDR = new Wallet(TEST_TEST_PK).address;
     const t = ref.getTwap();
     assert.strictEqual(t.authoritative, false);
     ref.stop();
+  });
+
+  test('PolyBolt sequence counters are tracked independently per channel', () => {
+    const logs = [];
+    const ref = makeRef(true, (level, message) => logs.push({ level, message }));
+    const now = Date.now();
+    // The spot channel can be one sequence ahead of TWAP without TWAP having
+    // regressed; each channel's own sequence is monotonic.
+    ref.handlePolyboltFrame({ channel: 'price.crypto', seq: 1553, payload: { value: 83565 } });
+    ref.handlePolyboltFrame({ channel: 'price.crypto.twap', seq: 1552, payload: { value: 83564, timestamp: now } });
+    ref.handlePolyboltFrame({ channel: 'price.crypto', seq: 1554, payload: { value: 83566 } });
+    ref.handlePolyboltFrame({ channel: 'price.crypto.twap', seq: 1553, payload: { value: 83565, timestamp: now + 1000 } });
+
+    assert.deepStrictEqual(logs.filter(x => /sequence regression/.test(x.message)), [],
+      'interleaved channels must not be compared against one shared counter');
+    assert.strictEqual(ref.polybolt.seqByChannel['price.crypto'], 1554);
+    assert.strictEqual(ref.polybolt.seqByChannel['price.crypto.twap'], 1553);
+    assert.strictEqual(ref.twap.value, 83565);
+  });
+
+  test('a regressing PolyBolt frame identifies its channel and is ignored', () => {
+    const logs = [];
+    const ref = makeRef(true, (level, message) => logs.push({ level, message }));
+    const now = Date.now();
+    ref.handlePolyboltFrame({ channel: 'price.crypto.twap', seq: 200, payload: { value: 83564, timestamp: now } });
+    ref.handlePolyboltFrame({ channel: 'price.crypto.twap', seq: 199, payload: { value: 1, timestamp: now + 1000 }, dropped: 2 });
+
+    assert.ok(logs.some(x => x.level === 'WARN'
+      && /sequence regression channel=price\.crypto\.twap 199 < 200; ignoring stale frame/.test(x.message)),
+    'regression warning should identify the channel and the stale frame');
+    assert.strictEqual(ref.twap.value, 83564, 'a stale frame must not replace the current TWAP');
+    assert.strictEqual(ref.polybolt.seqByChannel['price.crypto.twap'], 200,
+      'the per-channel high-water sequence must not move backwards');
+    assert.strictEqual(ref.polybolt.dropped, 2, 'dropped-frame metadata is retained even on stale frames');
   });
 
   test('the full dashboard payload applies every field', () => {
