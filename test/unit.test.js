@@ -496,6 +496,48 @@ const TEST_TEST_ADDR = new Wallet(TEST_TEST_PK).address;
     assert.ok(r && r.signal === 'BUY_UP', `got ${JSON.stringify(r)}`);
     assert.ok(r.edge > CONFIG.strategies.fairValueEv.minNetEdge);
   });
+
+  test('taker strategies use the selected DOWN book tick when UP and DOWN ticks differ', () => {
+    const ctx = makeCtx();
+    ctx.books.up = normaliseBook({
+      asset_id: 'up', bids: [{ price: '0.49', size: '1000' }],
+      asks: [{ price: '0.50', size: '1000' }], tick_size: '0.01', min_order_size: '5',
+    });
+    ctx.books.down = normaliseBook({
+      asset_id: 'down', bids: [{ price: '0.49', size: '1000' }],
+      asks: [{ price: '0.501', size: '1000' }], tick_size: '0.001', min_order_size: '5',
+    });
+    // Deliberately retain the old shared-UP constraint. The selected book must
+    // override it: 0.501 + 2c rounds to 0.521 on DOWN's tick, not 0.53 on UP's.
+    ctx.constraints = { tickSize: 0.01, minOrderSize: 5, negRisk: false };
+    ctx.model = { pUp: 0.44, pDown: 0.56 };
+    const r = ctx.engine.candidate(ctx, 'DOWN', {
+      minNetEdge: 0.015, reason: 'different per-token ticks', degraded: false,
+    });
+    assert.strictEqual(r.signal, 'BUY_DOWN', r.reason);
+    assert.strictEqual(r.executionPrice, 0.521);
+    assert.ok(r.edge >= 0.015, `edge ${r.edge}`);
+  });
+
+  test('maker strategy tick improvement also uses the selected DOWN book tick', () => {
+    const ctx = makeCtx();
+    ctx.books.up = normaliseBook({
+      asset_id: 'up', bids: [{ price: '0.49', size: '1000' }],
+      asks: [{ price: '0.51', size: '1000' }], tick_size: '0.01', min_order_size: '5',
+    });
+    ctx.books.down = normaliseBook({
+      asset_id: 'down', bids: [{ price: '0.501', size: '1000' }],
+      asks: [{ price: '0.51', size: '1000' }], tick_size: '0.001', min_order_size: '5',
+    });
+    ctx.constraints = { tickSize: 0.01, minOrderSize: 5, negRisk: false };
+    ctx.model = { pUp: 0.42, pDown: 0.58 };
+    const c = CONFIG.strategies.makerReversion;
+    const r = ctx.engine.makerCandidate(ctx, 'DOWN', {
+      minNetEdge: c.minNetEdge, reason: 'different per-token ticks', degraded: false, cfg: c,
+    });
+    assert.strictEqual(r.signal, 'BUY_DOWN', r.reason);
+    assert.strictEqual(r.quotePrice, 0.502, 'one DOWN tick above 0.501 is 0.502, not 0.51');
+  });
   test('fair-value EV refuses a 51% model at 51c (fee eats the edge)', () => {
     const ctx = makeCtx();
     ctx.model = { pUp: 0.51, pDown: 0.49, expectedCloseTwap: 100001, sigmaWindow: 10, drift: 1 };
@@ -1639,6 +1681,33 @@ const TEST_TEST_ADDR = new Wallet(TEST_TEST_PK).address;
     assert.strictEqual(b, restBook);
   });
 
+  await testAsync('buildContext keeps current UP and DOWN book constraints separate', async () => {
+    const cfg = JSON.parse(JSON.stringify(CONFIG));
+    cfg.runtime.stateFile = require('path').join(require('os').tmpdir(), `bot-side-ticks-${Date.now()}.json`);
+    const bot = new BotCore({ config: cfg, auth: { setPaperMode() {}, getStatus: () => ({}) } });
+    const books = {
+      up: normaliseBook({
+        asset_id: 'u', bids: [{ price: '0.49', size: '1000' }],
+        asks: [{ price: '0.50', size: '1000' }], tick_size: '0.01', min_order_size: '5',
+      }),
+      down: normaliseBook({
+        asset_id: 'd', bids: [{ price: '0.49', size: '1000' }],
+        asks: [{ price: '0.501', size: '1000' }], tick_size: '0.001', min_order_size: '7',
+      }),
+    };
+    bot.bookForDecision = async (tokenId) => (tokenId === 'u' ? books.up : books.down);
+    const ctx = await bot.buildContext({
+      slug: 'different-ticks', upTokenId: 'u', downTokenId: 'd', epoch: 1,
+      remainingSec: 100, tickSize: 0.01, minOrderSize: 5, negRisk: false,
+      feeSchedule: { rate: 0.07, exponent: 1 },
+    });
+    assert.strictEqual(ctx.constraints.up.tickSize, 0.01);
+    assert.strictEqual(ctx.constraints.down.tickSize, 0.001);
+    assert.strictEqual(ctx.constraints.down.minOrderSize, 7);
+    assert.strictEqual(ctx.constraints.tickSize, 0.01,
+      'the legacy top-level field is only the market fallback, never copied into DOWN');
+  });
+
   test('a window that opened before the bot could observe it is explained, not silent', async () => {
     const { ReferencePrice } = require('../referencePrice');
     const cfg = JSON.parse(JSON.stringify(CONFIG));
@@ -1943,6 +2012,86 @@ const TEST_TEST_ADDR = new Wallet(TEST_TEST_PK).address;
     });
     assert.strictEqual(pos, null);
     assert.match(bot.lastSkipReason, /MIN_NET_EDGE floor 1\.50c/);
+  });
+
+  await testAsync('DOWN entry pricing, sizing and signed amounts use the DOWN book tick', async () => {
+    const cfg = JSON.parse(JSON.stringify(CONFIG));
+    const file = require('path').join(require('os').tmpdir(), `bot-signed-side-tick-${Date.now()}.json`);
+    cfg.runtime.stateFile = file;
+    cfg.runtime.paperMode = false;
+    cfg.runtime.dryRunOrders = false;
+    const wallet = new Wallet(TEST_TEST_PK);
+    const auth = {
+      wallet,
+      funderAddress: wallet.address,
+      signerAddress: wallet.address,
+      signatureType: 0,
+      geoblock: null,
+      setPaperMode() {},
+      getStatus: () => ({}),
+      hasL2Credentials: () => true,
+      checkBalance: async () => ({ ok: true, balance: 1000 }),
+    };
+    const bot = new BotCore({ config: cfg, auth });
+    bot.paperMode = false;
+    bot.orderVersionOk = true;
+    bot.approvalState = { ok: true, missing: [] };
+
+    const up = normaliseBook({
+      asset_id: '111', bids: [{ price: '0.49', size: '5000' }],
+      asks: [{ price: '0.50', size: '5000' }], tick_size: '0.01', min_order_size: '5',
+    });
+    const down = normaliseBook({
+      asset_id: '222', bids: [{ price: '0.49', size: '5000' }],
+      asks: [{ price: '0.501', size: '5000' }], tick_size: '0.001', min_order_size: '5',
+    });
+    const ctx = {
+      market: {
+        slug: 'different-ticks', conditionId: '0xc', upTokenId: '111', downTokenId: '222',
+        tokenMappingOk: true, protocolV2: false, remainingSec: 100,
+        endTime: new Date().toISOString(), feeSchedule: { rate: 0.07, exponent: 1 },
+      },
+      books: { up, down },
+      model: { pUp: 0.2, pDown: 0.8 },
+      feeSchedule: { rate: 0.07, exponent: 1 },
+      // Regression witness: this was copied from UP and used for DOWN too.
+      constraints: { tickSize: 0.01, minOrderSize: 5, negRisk: false },
+      windowOpen: null,
+      twap: { value: 100000, source: 'test', authoritative: true },
+      spot: { value: 100000 },
+      degraded: false,
+    };
+    let signedOrder = null;
+    bot.clob.postOrder = async (order) => {
+      signedOrder = order;
+      // Submission result is irrelevant; capturing what was signed is the test.
+      return { ok: false, status: 400, body: { error: 'test stop after signing' } };
+    };
+
+    try {
+      await bot.executeSignal(ctx, {
+        signal: 'BUY_DOWN', side: 'DOWN', prob: 0.8, edge: 0.2,
+        strategy: 'fairValueEv', strategyName: 'Fair-Value EV', reason: 'tick regression',
+      });
+      assert.ok(signedOrder, 'the live path must reach EIP-712 signing');
+      assert.strictEqual(signedOrder.tokenId, '222');
+
+      const price = 0.521; // 0.501 ask + 2c, rounded on DOWN's 0.001 tick
+      const sized = sizeOrder({
+        stakeUsd: bot.tradeAmountUsd, price, minShares: 5, tickSize: 0.001,
+        maxStakeUsd: bot.maxTradeAmountUsd, minOrderPolicy: cfg.order.minOrderPolicy,
+        feeSchedule: ctx.feeSchedule,
+      });
+      const expected = computeMarketBuyAmounts(price, sized.usd, 0.001);
+      assert.strictEqual(signedOrder.makerAmount, expected.makerAmount);
+      assert.strictEqual(signedOrder.takerAmount, expected.takerAmount,
+        'the signed share amount must use DOWN tick precision');
+      assert.notStrictEqual(Number(signedOrder.takerAmount),
+        Number(computeMarketBuyAmounts(0.53, sized.usd, 0.01).takerAmount),
+        'the old UP-tick payload is observably different');
+    } finally {
+      try { require('fs').unlinkSync(file); } catch (_) {}
+    }
   });
 
   test('a degraded feed scales the module gate but not the global floor', () => {

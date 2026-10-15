@@ -119,6 +119,22 @@ module.exports = async function runExitTests(harness = {}) {
     assert.ok(r.makerAmount && r.takerAmount, 'must return signed 6-decimal amounts');
   });
 
+  t('a tick change after entry uses the current exit book tick for price and signed amounts', () => {
+    const pos = position({ tickSize: 0.01 }); // saved when the entry was signed
+    const book = normaliseBook({
+      asset_id: '111', bids: [{ price: '0.987', size: '5000' }], asks: [],
+      tick_size: '0.001', min_order_size: '5',
+    });
+    const r = plan(pos, book, 0.995, 30);
+    assert.strictEqual(r.exit, true, r.reason);
+    assert.strictEqual(r.tickSize, 0.001);
+    assert.strictEqual(r.limitPrice, 0.987,
+      'the current 0.001 tick preserves 98.7c; the saved 0.01 tick would round it to 98c');
+    assert.strictEqual(r.makerAmount, '20000000');
+    assert.strictEqual(r.takerAmount, '19740000',
+      'the SELL payload that gets signed must be formed with the current book tick rules');
+  });
+
   t('disabled by config means no exit, ever', () => {
     const r = plan(position(), decidedBook(), 0.995, 30, exitCfg({ enabled: false }));
     assert.strictEqual(r.exit, false);
