@@ -126,6 +126,8 @@ const CONFIG = {
       kellySizing: isSet('KELLY_SIZING'),
     },
     orderType: env('ORDER_TYPE', 'FAK'),  // FAK = marketable, cancels remainder
+    // Signed GTD expiry is floored at 210s (CLOB minimum + transit margin).
+    // Short rest/timeout deadlines are enforced by explicit cancellation.
     gtdSecondsLateWindow: num('GTD_SECONDS', 30),
   },
 

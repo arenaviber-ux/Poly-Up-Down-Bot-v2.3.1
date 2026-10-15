@@ -29,7 +29,7 @@ const { PolymarketAuth } = require('../polymarketAuth');
 const {
   computeBuyAmounts, computeMarketBuyAmounts, computeSellAmounts, sizeOrder, tickRules,
   roundPriceToTick, buildOrderTypedData, signOrder, wrapDepositWalletSignature,
-  saltFromRandom, MARKET_ORDER_TYPES, TICK_RULES,
+  saltFromRandom, gtdExpiration, MARKET_ORDER_TYPES, TICK_RULES,
   _internals,
 } = require('../orderSigner');
 const {
@@ -76,6 +76,21 @@ const TEST_TEST_PK = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b
 const TEST_TEST_ADDR = new Wallet(TEST_TEST_PK).address;
 
 (async function main() {
+  test('GTD expiry floors short lifetimes at 180s plus a transit margin', () => {
+    const nowMs = 1700000000123;
+    for (const seconds of [1, 20, 30, 179, 180, 0, -1, undefined, NaN]) {
+      const expiration = gtdExpiration(seconds, nowMs);
+      assert.ok(Number.isInteger(expiration));
+      assert.ok(expiration - nowMs / 1000 >= 210);
+      // A 30s signing/transit delay still leaves >=180s at the exchange.
+      assert.ok(expiration - (nowMs / 1000 + 30) >= 180);
+    }
+  });
+  test('GTD expiry preserves longer configured horizons and rounds up', () => {
+    const nowMs = 1700000000123;
+    assert.strictEqual(gtdExpiration(600, nowMs), 1700000601);
+    assert.strictEqual(gtdExpiration(600.1, nowMs), 1700000602);
+  });
   // ------------------------------------------------------------------ L2 signing
   section('L2 request signing (HMAC-SHA256)');
   test('matches an independently computed signature', () => {

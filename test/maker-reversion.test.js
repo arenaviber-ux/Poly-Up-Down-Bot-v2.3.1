@@ -416,45 +416,59 @@ function wiredBot({ left = 150, pTarget = 0.58, upBid = 0.48, upAsk = 0.50 } = {
   });
 
   // ------------------------------------------- execution (live-ish shapes)
-  await test('a resting quote is pulled when the model stops supporting it', async () => {
-    const w = wiredBot({ left: 150, pTarget: 0.58, upBid: 0.48, upAsk: 0.51 });
-    const { bot, ctx, cancellations } = w;
-    const eng = engineWith(bot.cfg, 'makerReversion');
-    const decision = eng.makerReversion(ctx);
-    decision.strategy = 'makerReversion';
-    bot.strategies = eng;
+  for (const route of ['maker-model', 'maker-timeout', 'taker-gtd']) {
+    await test(`live ${route}: valid GTD expiry with a separate cancellation deadline`, async () => {
+      const w = wiredBot({ left: 150, pTarget: 0.58, upBid: 0.48, upAsk: 0.51 });
+      const { bot, ctx, cancellations } = w;
+      const eng = engineWith(bot.cfg, 'makerReversion');
+      const decision = eng.makerReversion(ctx);
+      decision.strategy = 'makerReversion';
+      bot.strategies = eng;
+      if (route === 'taker-gtd') {
+        decision.maker = false;
+        bot.cfg = { ...bot.cfg, order: { ...bot.cfg.order, orderType: 'GTD', gtdSecondsLateWindow: 30 } };
+      }
 
-    // Place it through the LIVE path so there is a real order id to cancel.
-    bot.paperMode = false;
-    bot.auth.hasL2Credentials = () => true;
-    bot.auth.checkBalance = async () => ({ ok: true, balance: 100 });
-    // A real Wallet, because the order path actually signs: stubbing the wallet
-    // would make this test pass on an exception caught three frames up.
-    const wallet = new (require('ethers').Wallet)('0x' + require('crypto').randomBytes(32).toString('hex'));
-    bot.auth.wallet = wallet;
-    bot.auth.funderAddress = wallet.address;
-    bot.auth.signerAddress = wallet.address;
-    bot.auth.signatureType = 0;
-    bot.orderVersionOk = true;
-    bot.approvalState = { ok: true, missing: [] };
-    let posted = null;
-    bot.clob.postOrder = async (order, opts) => {
-      posted = opts;
-      return { ok: true, body: { success: true, orderID: 'order-1', status: 'live' } };
-    };
-    const pos = await bot.executeSignal(ctx, decision);
-    assert.ok(pos, 'live placement failed');
-    assert.deepStrictEqual(posted, { orderType: 'GTD', postOnly: true },
-      'a maker entry must be GTD + postOnly regardless of ORDER_TYPE');
-    pos.orderIds = ['order-1'];
+      // Place it through the LIVE path so there is a real order id to cancel.
+      bot.paperMode = false;
+      bot.auth.hasL2Credentials = () => true;
+      bot.auth.checkBalance = async () => ({ ok: true, balance: 100 });
+      // A real Wallet, because the order path actually signs: stubbing the wallet
+      // would make this test pass on an exception caught three frames up.
+      const wallet = new (require('ethers').Wallet)('0x' + require('crypto').randomBytes(32).toString('hex'));
+      bot.auth.wallet = wallet;
+      bot.auth.funderAddress = wallet.address;
+      bot.auth.signerAddress = wallet.address;
+      bot.auth.signatureType = 0;
+      bot.orderVersionOk = true;
+      bot.approvalState = { ok: true, missing: [] };
+      let posted = null;
+      bot.clob.postOrder = async (order, opts) => {
+        posted = opts;
+        assert.ok(Number(order.expiration) - Date.now() / 1000 >= 180,
+          'mock CLOB rejects expiration less than 180 seconds in the future');
+        return { ok: true, body: { success: true, orderID: 'order-1', status: 'live' } };
+      };
+      const pos = await bot.executeSignal(ctx, decision);
+      assert.ok(pos, 'live placement failed');
+      assert.deepStrictEqual(posted, { orderType: 'GTD', postOnly: route !== 'taker-gtd' },
+        'a maker entry must be GTD + postOnly regardless of ORDER_TYPE');
+      pos.orderIds = ['order-1'];
 
-    // The model has moved against us.
-    bot.currentModelProb = async () => Number(pos.quotePrice) - 0.05;
-    await bot.managePassiveEntries();
-    assert.deepStrictEqual(cancellations, ['order-1'], 'the resting order must be cancelled');
-    assert.strictEqual(pos.status, 'CANCELLED');
-    assert.match(pos.cancelReason || '', /no longer supports/);
-  });
+      if (route === 'taker-gtd') return;
+      assert.ok(pos.quoteDeadlineMs - pos.quotePlacedAtMs <= pos.restSeconds * 1000 + 10,
+        'the exchange minimum must not lengthen the local rest window');
+      assert.ok(pos.restSeconds <= 20);
+      if (route === 'maker-timeout') pos.quoteDeadlineMs = Date.now() - 1;
+      // The model moved against us, or the short rest deadline elapsed.
+      bot.currentModelProb = async () => Number(pos.quotePrice) - 0.05;
+      await bot.managePassiveEntries();
+      assert.deepStrictEqual(cancellations, ['order-1'], 'the resting order must be cancelled');
+      assert.strictEqual(pos.status, 'CANCELLED');
+      assert.match(pos.cancelReason || '', route === 'maker-timeout' ? /rest window/ : /no longer supports/);
+    });
+
+  }
 
   await test('a partially filled quote keeps its shares when the rest is pulled', async () => {
     const w = wiredBot({ left: 150, pTarget: 0.58, upBid: 0.48, upAsk: 0.51 });

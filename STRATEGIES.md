@@ -212,7 +212,11 @@ quote       = min(bestBid + MR_IMPROVE_TICKS·tick,   # 1 tick above the bid
 netEdge     = p_model − quote                        # no fee term
 ```
 
-Submitted as **GTD + `postOnly`** for `MR_REST_SECONDS` (20s).
+Submitted as **GTD + `postOnly`**, with explicit cancellation after
+`MR_REST_SECONDS` (20s). The signed GTD expiration is at least 210s ahead to
+satisfy the CLOB's 180s minimum plus a 30s signing/transit margin; it is a longer
+backstop, not the quote's rest deadline. If the bot stops or cancellation fails,
+the quote can remain on the book until that exchange expiration.
 
 ### Why there is something to harvest
 
