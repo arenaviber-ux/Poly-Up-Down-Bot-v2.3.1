@@ -59,6 +59,32 @@ function resolveStrategyKey(key) {
   return ALIAS_INDEX.get(normaliseKey(key)) || null;
 }
 
+/**
+ * Resolve the tick for the outcome token a strategy is actually considering.
+ *
+ * UP and DOWN are separate CLOB assets and their ticks can differ (or change
+ * independently).  The selected book is therefore authoritative; the
+ * side-specific context and market/config values are only fallbacks for old
+ * snapshots and hand-built test/API contexts.
+ */
+function outcomeTickSize(ctx, side, fallback) {
+  const key = String(side || '').toLowerCase();
+  const book = key === 'up' ? ctx.books && ctx.books.up : ctx.books && ctx.books.down;
+  const sideConstraints = ctx.constraints && ctx.constraints[key];
+  const candidates = [
+    book && book.tickSize,
+    sideConstraints && sideConstraints.tickSize,
+    ctx.constraints && ctx.constraints.tickSize,
+    ctx.market && ctx.market.tickSize,
+    fallback,
+  ];
+  for (const candidate of candidates) {
+    const tick = Number(candidate);
+    if (Number.isFinite(tick) && tick > 0) return tick;
+  }
+  return Number(fallback);
+}
+
 class StrategyEngine {
   constructor(config, { log = () => {} } = {}) {
     this.cfg = config;
@@ -270,7 +296,7 @@ class StrategyEngine {
     const t = entryEdgeTest({
       prob,
       bestAsk: price,
-      tickSize: (ctx.constraints && ctx.constraints.tickSize) || this.cfg.order.tickSize,
+      tickSize: outcomeTickSize(ctx, side, this.cfg.order.tickSize),
       maxSlippageCents: this.cfg.order.maxSlippageCents,
       maxBuyPrice: this.cfg.order.maxBuyPrice,
       feeSchedule: ctx.feeSchedule,
@@ -372,7 +398,7 @@ class StrategyEngine {
       };
     }
 
-    const tick = (ctx.constraints && ctx.constraints.tickSize) || this.cfg.order.tickSize;
+    const tick = outcomeTickSize(ctx, side, this.cfg.order.tickSize);
     const ceiling = Math.min(prob - minNetEdge, c.maxQuotePrice);
     const floorBelowBid = book.bestBid - c.maxTicksBelowBid * tick;
     if (!(ceiling > 0)) {

@@ -72,7 +72,20 @@ function planExit({ position, book, probUp, secondsLeft, feeSchedule, cfg, now =
   if (TERMINAL_STATUSES.has(pos.status)) return no('terminal', `position is ${pos.status}`);
   if (pos.exiting) return no('in-flight', 'an exit order is already live for this position');
 
-  const tickSize = pos.tickSize || cfg.tickSizeFallback || 0.01;
+  // The book is the current constraint source. A position's saved tick is only
+  // an entry-time snapshot and may be stale after a tick_size_change event.
+  // Every rounded value below (size, limit and signed amounts) must use the
+  // tick that applies to the token being sold now.
+  const bookTick = Number(book && book.tickSize);
+  const positionTick = Number(pos.tickSize);
+  const fallbackTick = Number(cfg.tickSizeFallback);
+  const tickSize = Number.isFinite(bookTick) && bookTick > 0
+    ? bookTick
+    : Number.isFinite(positionTick) && positionTick > 0
+      ? positionTick
+      : Number.isFinite(fallbackTick) && fallbackTick > 0
+        ? fallbackTick
+        : 0.01;
   const heldTotal = Number(pos.filledShares || 0);
   const alreadySold = Number(pos.exitShares || 0);
   if (!(heldTotal > 0)) return no('unfilled', 'position has no filled shares yet');
@@ -193,6 +206,7 @@ function planExit({ position, book, probUp, secondsLeft, feeSchedule, cfg, now =
     reason: `model ${pos.side} ${(probSide * 100).toFixed(1)}%, bid ${(bestBid * 100).toFixed(1)}c, `
       + `${Math.round(sec)}s to expiry — selling ${amounts.size} shares at ${(amounts.price * 100).toFixed(1)}c`,
     probSide,
+    tickSize,
     sellShares: amounts.size,
     limitPrice: amounts.price,
     makerAmount: amounts.makerAmount,

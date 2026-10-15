@@ -72,6 +72,58 @@ function resolveSettingKey(key) {
   return SETTING_INDEX.get(String(key === undefined || key === null ? '' : key).toLowerCase()) || null;
 }
 
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function firstDefined(...values) {
+  for (const value of values) {
+    if (value !== null && value !== undefined) return value;
+  }
+  return null;
+}
+
+/**
+ * Trading constraints for one outcome token.
+ *
+ * An Up/Down pair has two independent books. In particular, a tick-size-change
+ * event can update only one token, so the selected token's current book must
+ * win over both the context snapshot and the market-level discovery fallback.
+ */
+function outcomeConstraints(ctx, side, cfg) {
+  const key = String(side || '').toLowerCase();
+  const book = key === 'up' ? ctx.books && ctx.books.up : ctx.books && ctx.books.down;
+  const sideConstraints = ctx.constraints && ctx.constraints[key];
+  const sharedConstraints = ctx.constraints || {};
+  return {
+    tickSize: firstPositiveNumber(
+      book && book.tickSize,
+      sideConstraints && sideConstraints.tickSize,
+      sharedConstraints.tickSize,
+      ctx.market && ctx.market.tickSize,
+      cfg.order.tickSize,
+    ),
+    minOrderSize: firstPositiveNumber(
+      book && book.minOrderSize,
+      sideConstraints && sideConstraints.minOrderSize,
+      sharedConstraints.minOrderSize,
+      ctx.market && ctx.market.minOrderSize,
+      cfg.order.minShares,
+    ),
+    negRisk: !!firstDefined(
+      book && book.negRisk,
+      sideConstraints && sideConstraints.negRisk,
+      sharedConstraints.negRisk,
+      ctx.market && ctx.market.negRisk,
+      false,
+    ),
+  };
+}
+
 class BotCore extends EventEmitter {
   constructor({ config, auth, log = () => {} }) {
     super();
@@ -698,10 +750,25 @@ class BotCore extends EventEmitter {
     const downBook = await this.bookForDecision(market.downTokenId);
     if (!upBook && !downBook) return null;
 
-    // Book values are authoritative for the trading constraints.
-    const tickSize = (upBook && upBook.tickSize) || market.tickSize || this.cfg.order.tickSize;
-    const minOrderSize = (upBook && upBook.minOrderSize) || market.minOrderSize || this.cfg.order.minShares;
-    const negRisk = (upBook && upBook.negRisk !== null) ? upBook.negRisk : market.negRisk;
+    // UP and DOWN are separate CLOB assets. Keep each book's constraints with
+    // that outcome: their ticks can differ, and a tick_size_change can update
+    // only one of them. The top-level values are market/config fallbacks for
+    // legacy callers; order decisions always select `up` or `down` below.
+    const fallbackConstraints = {
+      tickSize: firstPositiveNumber(market.tickSize, this.cfg.order.tickSize),
+      minOrderSize: firstPositiveNumber(market.minOrderSize, this.cfg.order.minShares),
+      negRisk: !!firstDefined(market.negRisk, false),
+    };
+    const constraintsForBook = (book) => ({
+      tickSize: firstPositiveNumber(book && book.tickSize, fallbackConstraints.tickSize),
+      minOrderSize: firstPositiveNumber(book && book.minOrderSize, fallbackConstraints.minOrderSize),
+      negRisk: !!firstDefined(book && book.negRisk, fallbackConstraints.negRisk),
+    });
+    const constraints = {
+      ...fallbackConstraints,
+      up: constraintsForBook(upBook),
+      down: constraintsForBook(downBook),
+    };
 
     const twap = this.ref.getTwap();
     const spot = this.ref.getSpot();
@@ -741,7 +808,7 @@ class BotCore extends EventEmitter {
       model,
       degraded: !authoritative,
       feeSchedule: market.feeSchedule || { rate: this.cfg.fees.defaultTakerRate, exponent: 1, takerOnly: true },
-      constraints: { tickSize, minOrderSize, negRisk },
+      constraints,
       mode: this.paperMode ? 'paper' : 'live',
     };
   }
@@ -826,9 +893,10 @@ class BotCore extends EventEmitter {
    * Take a signal through the full order path.
    */
   async executeSignal(ctx, decision) {
-    const { market, constraints, feeSchedule } = ctx;
+    const { market, feeSchedule } = ctx;
     const side = decision.side;
     const book = side === 'UP' ? ctx.books.up : ctx.books.down;
+    const constraints = outcomeConstraints(ctx, side, this.cfg);
     const tokenId = side === 'UP' ? market.upTokenId : market.downTokenId;
     // Name the module that produced the signal in every drop path, and record
     // the reason on the bot state: a signal that fires in the engine but is
@@ -838,10 +906,10 @@ class BotCore extends EventEmitter {
     // bid to quote behind, not an ask to take. Requiring `bestAsk` here would
     // reject exactly the markets where passive quoting is the only route in.
     const maker = !!(decision.maker && Number.isFinite(decision.quotePrice));
-    const missingQuote = maker
+    const missingQuote = !book || (maker
       ? (book.bestBid === null || book.bestBid === undefined)
-      : (book.bestAsk === null || book.bestAsk === undefined);
-    if (!book || missingQuote) {
+      : (book.bestAsk === null || book.bestAsk === undefined));
+    if (missingQuote) {
       this.lastSkipReason = `${tag} fired but did not trade: `
         + (maker ? `no bid to quote behind on ${side}` : `no ask liquidity on ${side}`);
       this.logLine('WARN', this.lastSkipReason);
