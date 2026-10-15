@@ -22,7 +22,7 @@ const { MarketStream } = require('./wsMarket');
 const { UserStream } = require('./wsUser');
 const { ReferencePrice } = require('./referencePrice');
 const { StrategyEngine } = require('./strategyEngine');
-const { signOrder, sizeOrder, computeBuyAmounts, computeMarketBuyAmounts, MARKET_ORDER_TYPES, roundPriceToTick, tickRules } = require('./orderSigner');
+const { signOrder, gtdExpiration, sizeOrder, computeBuyAmounts, computeMarketBuyAmounts, MARKET_ORDER_TYPES, roundPriceToTick, tickRules } = require('./orderSigner');
 const { fairProbUp, feeTotal, feePerShare, kellyStake, entryEdgeTest, makerEdgeTest } = require('./pricing');
 const { Redeemer } = require('./redeemer');
 const exitLogic = require('./exitManager');
@@ -1160,11 +1160,11 @@ class BotCore extends EventEmitter {
 
     let signed;
     try {
-      // A maker quote expires when its rest window ends, not at the generic GTD
-      // horizon. The GTD expiry is the backstop that takes the quote off the book
-      // even if this process dies mid-rest.
+      // The CLOB requires >=180s of GTD validity. Short quote lifetimes are
+      // enforced by quoteDeadlineMs and the cancellation timer, not expiration.
+      // If this process dies, the order can rest until this longer backstop.
       const expiration = orderType === 'GTD'
-        ? Math.floor(Date.now() / 1000) + (maker ? restSeconds : this.cfg.order.gtdSecondsLateWindow)
+        ? gtdExpiration(maker ? restSeconds : this.cfg.order.gtdSecondsLateWindow)
         : 0;
       signed = await signOrder(this.auth.wallet, {
         tokenId,
@@ -1415,8 +1415,8 @@ class BotCore extends EventEmitter {
       await this.cancelPassiveEntry(pos, `rest window of ${Number(pos.restSeconds).toFixed(0)}s elapsed`);
       return;
     }
-    // 2) Never work a quote into the closing seconds. The GTD expiry would get
-    //    there anyway; this names the reason instead of leaving it implicit.
+    // 2) Never work a quote into the closing seconds. The exchange-valid GTD
+    //    backstop can extend past this window, so explicit cancellation matters.
     if (Number.isFinite(pos.expiresAtEpoch)) {
       const left = pos.expiresAtEpoch - Math.floor(now / 1000);
       if (left <= this.cfg.risk.minSecondsToExpiry) {
@@ -1765,7 +1765,7 @@ class BotCore extends EventEmitter {
     let signed;
     try {
       const expiration = orderType === 'GTD'
-        ? Math.floor(Date.now() / 1000) + this.cfg.order.gtdSecondsLateWindow
+        ? gtdExpiration(this.cfg.order.gtdSecondsLateWindow)
         : 0;
       signed = await signOrder(this.auth.wallet, {
         tokenId: pos.tokenId,

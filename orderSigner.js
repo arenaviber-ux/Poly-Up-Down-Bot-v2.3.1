@@ -15,6 +15,17 @@ const { AbiCoder, keccak256, toUtf8Bytes, concat } = require('ethers');
 const { EXCHANGES } = require('./contracts');
 const { feePerShare } = require('./pricing');
 
+// The CLOB rejects GTD expirations less than 180 seconds ahead. Leave
+// another 30 seconds for signing, transit and modest clock skew. This is an
+// absolute server-side backstop, NOT the bot's short cancellation deadline.
+const GTD_MIN_SECONDS = 180;
+const GTD_EXPIRY_MARGIN_SECONDS = 30;
+function gtdExpiration(seconds, nowMs = Date.now()) {
+  const horizon = Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : 0;
+  return Math.ceil(nowMs / 1000)
+    + Math.max(horizon, GTD_MIN_SECONDS + GTD_EXPIRY_MARGIN_SECONDS);
+}
+
 // CLOB V2 exchange domain. `verifyingContract` is the V2 exchange this order
 // settles through (see contracts.js); signing against the V1 exchange address
 // is rejected as an invalid signature.
@@ -502,6 +513,7 @@ module.exports = {
   roundPriceToTick,
   saltFromRandom,
   signOrder,
+  gtdExpiration,
   sizeOrder,
   tickRules,
   MARKET_ORDER_TYPES,

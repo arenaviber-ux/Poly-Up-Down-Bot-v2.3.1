@@ -421,49 +421,60 @@ function sweepBot(cfg, relayer) {
   });
 
   // ================================================= the live SELL path
-  await t('a live exit refreshes the CLOB conditional-token cache before selling', async () => {
-    // The CLOB validates a SELL against its own cached conditional allowance,
-    // refreshed only per token on request. Without this the exit is rejected
-    // with the same "not enough balance / allowance" as an unapproved BUY, even
-    // though setApprovalForAll is granted on-chain.
-    const cfg = authedCfg(config());
-    cfg.runtime.paperMode = false;
-    const bot = botFor(cfg, {
-      authOverrides: {
-        signatureType: 3,
-        funderAddress: '0x' + '11'.repeat(20),
-        hasL2Credentials: () => true,
-        geoblock: null,
-      },
+  for (const orderType of ['FAK', 'GTD']) {
+    await t(`a live ${orderType} exit refreshes the conditional cache and signs a valid expiry`, async () => {
+      // The CLOB validates a SELL against its own cached conditional allowance,
+      // refreshed only per token on request. Without this the exit is rejected
+      // with the same "not enough balance / allowance" as an unapproved BUY, even
+      // though setApprovalForAll is granted on-chain.
+      const cfg = authedCfg(config());
+      cfg.runtime.paperMode = false;
+      cfg.exit.orderType = orderType;
+      const bot = botFor(cfg, {
+        authOverrides: {
+          signatureType: 3,
+          funderAddress: '0x' + '11'.repeat(20),
+          hasL2Credentials: () => true,
+          geoblock: null,
+        },
+      });
+      const syncs = [];
+      bot.auth.syncBalanceAllowance = async (o = {}) => { syncs.push(o); return null; };
+      const posted = [];
+      bot.clob.postOrder = async (order, opts) => {
+        assert.strictEqual(opts.orderType, orderType);
+        if (orderType === 'GTD') {
+          assert.ok(Number(order.expiration) - Date.now() / 1000 >= 180,
+            'mock CLOB rejects expiration less than 180 seconds in the future');
+        } else {
+          assert.strictEqual(order.expiration, '0');
+        }
+        posted.push({ order, opts });
+        return { ok: true, status: 200, body: { success: true, orderID: 'exit-1', status: 'matched' } };
+      };
+      bot.reconcileExitOrder = async () => null;
+
+      const pos = heldPosition({ isPaper: false, status: 'FILLED' });
+      const plan = {
+        exit: true, code: 'exit', reason: 'test', probSide: 0.99,
+        sellShares: 20, limitPrice: 0.95,
+        makerAmount: String(20 * 1e6),
+        takerAmount: String(Math.round(0.95 * 20 * 1e6)),
+      };
+      await bot.executeExit(pos, plan, { market: market(20), book: decidedBook('111') });
+
+      assert.strictEqual(posted.length, 1, 'the SELL was submitted');
+      // The REST payload keeps the string ("SELL"); the numeric 1 that goes into
+      // the EIP-712 message is covered in unit.test.js (`td.message.side`).
+      assert.strictEqual(posted[0].order.side, 'SELL');
+      assert.strictEqual(posted[0].order.tokenId, pos.tokenId);
+      const conditional = syncs.find(s => s.tokenId === pos.tokenId);
+      assert.ok(conditional, `no CONDITIONAL refresh for ${pos.tokenId}: ${JSON.stringify(syncs)}`);
+      assert.strictEqual(conditional.force, true, 'a throttled sync would keep the stale zero');
+      assert.ok(syncs.indexOf(conditional) === 0, 'it must happen before the order is built');
     });
-    const syncs = [];
-    bot.auth.syncBalanceAllowance = async (o = {}) => { syncs.push(o); return null; };
-    const posted = [];
-    bot.clob.postOrder = async (order, opts) => {
-      posted.push({ order, opts });
-      return { ok: true, status: 200, body: { success: true, orderID: 'exit-1', status: 'matched' } };
-    };
-    bot.reconcileExitOrder = async () => null;
 
-    const pos = heldPosition({ isPaper: false, status: 'FILLED' });
-    const plan = {
-      exit: true, code: 'exit', reason: 'test', probSide: 0.99,
-      sellShares: 20, limitPrice: 0.95,
-      makerAmount: String(20 * 1e6),
-      takerAmount: String(Math.round(0.95 * 20 * 1e6)),
-    };
-    await bot.executeExit(pos, plan, { market: market(20), book: decidedBook('111') });
-
-    assert.strictEqual(posted.length, 1, 'the SELL was submitted');
-    // The REST payload keeps the string ("SELL"); the numeric 1 that goes into
-    // the EIP-712 message is covered in unit.test.js (`td.message.side`).
-    assert.strictEqual(posted[0].order.side, 'SELL');
-    assert.strictEqual(posted[0].order.tokenId, pos.tokenId);
-    const conditional = syncs.find(s => s.tokenId === pos.tokenId);
-    assert.ok(conditional, `no CONDITIONAL refresh for ${pos.tokenId}: ${JSON.stringify(syncs)}`);
-    assert.strictEqual(conditional.force, true, 'a throttled sync would keep the stale zero');
-    assert.ok(syncs.indexOf(conditional) === 0, 'it must happen before the order is built');
-  });
+  }
 
   await t('a paper exit does not touch the CLOB cache', async () => {
     const bot = botFor(config());

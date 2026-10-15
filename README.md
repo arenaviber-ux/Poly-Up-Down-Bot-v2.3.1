@@ -59,6 +59,14 @@ is submitted `GTD` + `postOnly` for up to `MR_REST_SECONDS` (20s), and
 moment the model stops supporting it — because a quote that no longer has an
 edge is not liquidity provision, it is a standing offer to be picked off.
 
+**GTD expiry and quote lifetime are separate.** The CLOB requires expiration
+at least 180 seconds ahead. The bot therefore signs GTD orders with a minimum
+210-second horizon (180s plus a 30s signing/transit margin), while keeping the
+20-second maker rest deadline and explicitly cancelling the quote when it
+elapses. Longer `GTD_SECONDS` values are preserved. If the process stops or
+cancellation fails, a quote can remain live until the longer exchange expiry;
+GTD cannot guarantee a 20-second server-side expiry.
+
 Two reasons it is the highest-value addition here:
 
 * **It removes the largest term in the P&L, not a fraction of it.** At 50¢ the
@@ -421,6 +429,7 @@ made every Deposit Wallet order invalid.
 | CLOB balance $0 but you funded the account | pUSD landed on the **signer EOA** instead of the account wallet — transfer it, or you deposited USDC.e, which must be wrapped to pUSD via the CollateralOnramp |
 | `Trading restricted in your region` | geoblocked IP; run from an eligible jurisdiction |
 | SQS stands down with `only 9s left (need ≥10s)` | correct: `MIN_SECONDS_TO_EXPIRY=10` is the account floor. Lower it if you want the module to trade closer to expiry — `SQS_MIN_LEFT` now follows it automatically |
+| Orders rejected with `expiration is less than 180 seconds in the future` | update to the GTD-expiry fix: short maker rest windows and `GTD_SECONDS` are now clamped to an exchange-valid signed expiry; do not increase `MR_REST_SECONDS` to 180s as a workaround |
 | No signals, reason `no fair-value model` | the current window opened before the bot had 60s of TWAP history — it will trade the next window |
 | `SPOT PROXY (degraded)` badge | PolyBolt TWAP needs L2 credentials; the bot widens thresholds until then |
 | `order_version_mismatch` from `POST /order` | the CLOB moved this book to a different exchange version (`GET /version` reports it). This bot signs version 2 (the CLOB V2 CTF exchanges); the doctor and `GET /api/diagnostics` say which version the server wants, and live entries stand down rather than submit an unmatched order |
