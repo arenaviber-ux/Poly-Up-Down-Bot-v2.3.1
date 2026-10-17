@@ -199,6 +199,29 @@ npm start                 # dashboard on http://127.0.0.1:3000
 The bot starts in **paper mode**. Flip to live in the dashboard (or `PAPER_MODE=false`)
 only after `npm run doctor` reports no blockers.
 
+### Did the strategy actually work? (`npm run report`)
+
+A breakeven P&L after 30 trades is not a verdict. These are binary contracts: a
+$10 position bought near 60c pays +$6.67 or loses $10, while the edge being
+harvested is worth about $0.25 — so one trade's noise is 20–40× the signal. At
+the shipped `MR_MIN_EDGE` a genuinely profitable Passive Reversion run still
+finishes at or below breakeven after 30 trades **about 43% of the time**, and
+resolving a 1.5c edge at 95% confidence takes thousands of trades, not dozens.
+
+```bash
+npm run report                    # scorecard from ./bot_state.json
+npm run report -- --strategy passive
+npm run report -- --json          # for a spreadsheet
+```
+
+It reports, per strategy: resolved trades, win rate versus the **breakeven win
+rate** (the average price actually paid), net P&L with a 95% confidence
+interval, the sample size needed to resolve the edge, and win rate by
+dislocation. That last table is the adverse-selection test: if bigger
+dislocations do *worse*, the fills are informed and the "noisy book" premise is
+not holding. The same scorecard is on the dashboard, computed from every
+resolved trade in memory; the CLI reads the last 100 saved in `bot_state.json`.
+
 ### Wallet setup (the part people get wrong)
 
 Polymarket accounts use three wallet shapes. The bot signs with your **signer key**
@@ -402,6 +425,7 @@ a private key. Change `BIND_HOST` only if you understand that exposure.
 npm test                 # 198 unit tests: signing, ticks, sizing, fees, model, strategies, exit planning, relayer signing
 npm run test:integration #  11 tests: position lifecycle — restart, settlement, fallbacks, risk
 npm run test:exit        #  37 tests: the recycling subsystem driving the real BotCore tick loop
+npm run test:stats       #  20 tests: the scorecard's confidence intervals, verdicts and buckets
 npm run test:all         # everything
 ```
 
@@ -474,6 +498,9 @@ tools/check-dashboard-banner.js
                      renders the real dashboard in jsdom and reads back the setup banner
 tools/check-dashboard-renders.js
                      loads the dashboard against the live server and fails on any JS error
+tools/strategy-report.js
+                     per-strategy scorecard: win rate vs breakeven, 95% CI, sample size, dislocation buckets
+strategyStats.js     the read-only statistics behind the dashboard panel and `npm run report`
 test/                unit + integration suites (approvals, approvals-rpc, order-version,
                      exit, exit-integration, approvals-integration)
 CAPITAL-RECYCLING.md v2.3: why the loop was broken, both mechanisms, every knob, failure modes

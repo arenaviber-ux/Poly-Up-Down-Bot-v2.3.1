@@ -26,6 +26,7 @@ const { signOrder, gtdExpiration, sizeOrder, computeBuyAmounts, computeMarketBuy
 const { fairProbUp, feeTotal, feePerShare, kellyStake, entryEdgeTest, makerEdgeTest } = require('./pricing');
 const { Redeemer } = require('./redeemer');
 const exitLogic = require('./exitManager');
+const strategyStats = require('./strategyStats');
 
 /**
  * Settings keys accepted by `updateSettings()`, with the aliases the dashboard
@@ -2571,6 +2572,13 @@ class BotCore extends EventEmitter {
         strategy: p.strategy,
       })),
       tradeHistory: this.tradeHistory.slice(0, 30),
+      // Per-strategy scorecard, computed from EVERY resolved trade still in
+      // memory rather than the 30-row history table above. Account-level
+      // `realizedPnl` mixes nine modules and two execution styles; this is the
+      // only view that can answer "did this strategy work", and it carries the
+      // sample size and confidence interval so a short run is not misread as a
+      // verdict. See strategyStats.js for the arithmetic.
+      strategyPerformance: strategyStats.summarizeTrades(this.tradeHistory),
       markets: this.markets.slice(0, 8),
       strategies: this.strategies.getState(),
       selectedTimeframe: this.selectedTimeframe,

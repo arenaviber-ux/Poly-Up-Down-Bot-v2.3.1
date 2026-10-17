@@ -289,6 +289,42 @@ because it is not paying a fee). `configWarnings()` says so at startup if you
 are running with one position slot. Raise `MAX_OPEN_POSITIONS` or lower
 `MR_REST_SECONDS` if that trade-off is not the one you want.
 
+### Reading the first results
+
+The module's edge is small and its outcome is binary, which makes short-run P&L
+a poor instrument. At the shipped 1.5¢ buffer, a $10 trade entered around 60¢
+earns about **$0.25** when the model is right, but it either pays **+$6.67** or
+loses **$10**. The per-trade standard deviation is ~$8, so over 30 trades the
+95% confidence interval on mean P&L is roughly **±$3** — wider than every edge
+this bot trades.
+
+That produces a result worth stating plainly: **a genuine 1.5¢ edge still
+finishes a 30-trade run at or below breakeven about 43% of the time.** A
+breakeven result after a dozen hours is therefore consistent with the module
+working, with it merely breaking even, and with it losing; the sample cannot
+distinguish them. Resolving an edge that size at 95% confidence needs roughly
+**4,000 trades** at a 60¢ average entry (about 3,500 at 70¢), not 30. Do not
+retune thresholds on the strength of a short run — that is fitting the
+configuration to noise.
+
+Two diagnostics resolve faster than P&L, and both are already recorded:
+
+* **Realised win rate vs. breakeven win rate.** A contract bought at `q` breaks
+  even only if it wins `q` of the time. At a 60¢ average fill the position needs
+  a 60% win rate; the model's 61.5% fair value is only a 1.5pp margin. If the
+  realised rate sits below the price paid, the model is stale *at the fills* —
+  the signature of adverse selection.
+* **Win rate by dislocation.** The premise is that a book 2–4¢ below fair is
+  noise that reverts. If larger dislocations produce *worse* outcomes, the
+  premise is wrong: the book is leading the lagging TWAP and the fills are
+  informed. If larger dislocations do better, the edge is real.
+
+`npm run report -- --strategy passive` prints both from `bot_state.json`, plus
+the confidence interval and the sample size still required. The dashboard's
+Strategy Scorecard shows the same for every module, computed from all resolved
+trades in memory. Treat its **Verdict** column as the result and the P&L as an
+observation.
+
 ### Tuning
 
 * **`MR_MIN_EDGE`** — the adverse-selection premium. 1.5¢ is conservative;
