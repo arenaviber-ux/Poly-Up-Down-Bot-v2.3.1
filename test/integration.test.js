@@ -121,6 +121,24 @@ function pos(overrides = {}) {
     assert.ok(bot.dailyLoss > 8);
   });
 
+  await t('getState exposes a per-strategy scorecard over resolved trades', async () => {
+    const bot = freshBot();
+    bot.activePositions = [pos()];
+    bot.onMarketResolved({ conditionId: '0xdeadbeef', winningTokenId: '111', winningOutcome: 'Up' });
+
+    const perf = bot.getState().strategyPerformance;
+    assert.ok(Array.isArray(perf), 'strategyPerformance must be an array');
+    const row = perf.find(r => r.strategy === 'fairValueEv');
+    assert.ok(row, 'settled trade must appear under its module, not the account');
+    assert.strictEqual(row.trades, 1);
+    assert.strictEqual(row.wins, 1);
+    assert.ok(Math.abs(row.netPnl - 1.888) < 1e-9, `netPnl ${row.netPnl}`);
+    // It is a result for accounting, but one trade is not evidence of an edge.
+    assert.strictEqual(row.verdict, 'too-early');
+    // Breakeven is the price paid: 8.00 cost + 0.112 fee over 10 shares.
+    assert.ok(Math.abs(row.breakevenWinRate - 0.8112) < 1e-9, `be ${row.breakevenWinRate}`);
+  });
+
   await t('resolution by winning TOKEN id works without an outcome label', async () => {
     const bot = freshBot();
     bot.activePositions = [pos({ side: 'DOWN', tokenId: '222' })];

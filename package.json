@@ -12,7 +12,9 @@
     "test:integration": "node test/integration.test.js",
     "test:exit": "node test/exit-integration.test.js",
     "test:approvals": "node test/approvals-integration.test.js",
-    "test:all": "node test/unit.test.js && node test/maker-reversion.test.js && node test/integration.test.js && node test/exit-integration.test.js && node test/approvals-integration.test.js"
+    "test:all": "node test/unit.test.js && node test/strategy-stats.test.js && node test/maker-reversion.test.js && node test/integration.test.js && node test/exit-integration.test.js && node test/approvals-integration.test.js",
+    "report": "node tools/strategy-report.js",
+    "test:stats": "node test/strategy-stats.test.js"
   },
   "keywords": [
     "polymarket",
